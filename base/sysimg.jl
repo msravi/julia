@@ -265,7 +265,7 @@ include("profile.jl")
 importall .Profile
 
 # Dates
-include("dates.jl")
+include("Dates.jl")
 importall .Dates
 
 function __init__()
