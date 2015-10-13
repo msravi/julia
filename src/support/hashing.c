@@ -1,3 +1,5 @@
+// This file is a part of Julia. License is MIT: http://julialang.org/license
+
 /*
   Hashing
 */
@@ -63,7 +65,7 @@ u_int32_t int64to32hash(u_int64_t key)
 
 #define _MHASH_SEED_ 0xcafe8881
 
-uint64_t memhash(const char* buf, size_t n)
+uint64_t memhash(const char *buf, size_t n)
 {
     uint64_t out[2];
 
@@ -76,7 +78,7 @@ uint64_t memhash(const char* buf, size_t n)
     return out[1];
 }
 
-uint64_t memhash_seed(const char* buf, size_t n, uint32_t seed)
+uint64_t memhash_seed(const char *buf, size_t n, uint32_t seed)
 {
     uint64_t out[2];
 
@@ -89,7 +91,7 @@ uint64_t memhash_seed(const char* buf, size_t n, uint32_t seed)
     return out[1];
 }
 
-uint32_t memhash32(const char* buf, size_t n)
+uint32_t memhash32(const char *buf, size_t n)
 {
     uint32_t out;
 
@@ -97,7 +99,7 @@ uint32_t memhash32(const char* buf, size_t n)
     return out;
 }
 
-uint32_t memhash32_seed(const char* buf, size_t n, uint32_t seed)
+uint32_t memhash32_seed(const char *buf, size_t n, uint32_t seed)
 {
     uint32_t out;
 

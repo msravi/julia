@@ -1,8 +1,10 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 module PkgToMaxSumInterface
 
 using ...Types, ...Query, ..VersionWeights
 
-export Interface, compute_output_dict,
+export Interface, compute_output_dict, greedysolver,
        verify_solution, enforce_optimality!
 
 # A collection of objects which allow interfacing external (Pkg) and
@@ -65,13 +67,14 @@ type Interface
         end
 
         # generate vdict
-        vdict = [(VersionNumber=>Int)[] for p0 = 1:np]
+        vdict = [Dict{VersionNumber,Int}() for p0 = 1:np]
         for (p,depsp) in deps
             p0 = pdict[p]
             vdict0 = vdict[p0]
+            pvers0 = pvers[p0]
             for vn in keys(depsp)
-                for v0 in 1:length(pvers[p0])
-                    if pvers[p0][v0] == vn
+                for v0 in 1:length(pvers0)
+                    if pvers0[v0] == vn
                         vdict0[vn] = v0
                         break
                     end
@@ -103,7 +106,7 @@ function compute_output_dict(sol::Vector{Int}, interface::Interface)
     pvers = interface.pvers
     spp = interface.spp
 
-    want = (ByteString=>VersionNumber)[]
+    want = Dict{ByteString,VersionNumber}()
     for p0 = 1:np
         p = pkgs[p0]
         s = sol[p0]
@@ -114,6 +117,80 @@ function compute_output_dict(sol::Vector{Int}, interface::Interface)
     end
 
     return want
+end
+
+# Produce a trivial solution: try to maximize each version;
+# bail out as soon as some non-trivial requirements are detected.
+function greedysolver(interface::Interface)
+    reqs = interface.reqs
+    deps = interface.deps
+    spp = interface.spp
+    pdict = interface.pdict
+    pvers = interface.pvers
+    np = interface.np
+
+    # initialize solution: all uninstalled
+    sol = [spp[p0] for p0 = 1:np]
+
+    # set up required packages to their highest allowed versions
+    for (rp,rvs) in reqs
+        rp0 = pdict[rp]
+        # look for the highest version which satisfies the requirements
+        rv = spp[rp0] - 1
+        while rv > 0
+            rvn = pvers[rp0][rv]
+            rvn in rvs && break
+            rv -= 1
+        end
+        @assert rv > 0
+        sol[rp0] = rv
+    end
+
+    # we start from required packages and explore the graph
+    # following dependencies
+    staged = Set{ByteString}(keys(reqs))
+    seen = copy(staged)
+
+    while !isempty(staged)
+        staged_next = Set{ByteString}()
+        for p in staged
+            p0 = pdict[p]
+            @assert sol[p0] < spp[p0]
+            vn = pvers[p0][sol[p0]]
+            a = deps[p][vn]
+
+            # scan dependencies
+            for (rp,rvs) in a.requires
+                rp0 = pdict[rp]
+                # look for the highest version which satisfies the requirements
+                rv = spp[rp0] - 1
+                while rv > 0
+                    rvn = pvers[rp0][rv]
+                    rvn in rvs && break
+                    rv -= 1
+                end
+                # if we found a version, and the package was uninstalled
+                # or the same version was already selected, we're ok;
+                # otherwise we can't be sure what the optimal configuration is
+                # and we bail out
+                if rv > 0 && (sol[rp0] == spp[rp0] || sol[rp0] == rv)
+                    sol[rp0] = rv
+                else
+                    return (false, Int[])
+                end
+
+                if !(rp in seen)
+                    push!(staged_next, rp)
+                end
+            end
+        end
+        union!(seen, staged_next)
+        staged = staged_next
+    end
+
+    @assert verify_solution(sol, interface)
+
+    return true, sol
 end
 
 # verifies that the solution fulfills all hard constraints
@@ -130,9 +207,9 @@ function verify_solution(sol::Vector{Int}, interface::Interface)
     # verify requirements
     for (p,vs) in reqs
         p0 = pdict[p]
-        @assert sol[p0] != spp[p0]
+        sol[p0] != spp[p0] || return false
         vn = pvers[p0][sol[p0]]
-        @assert in(vn, vs)
+        vn in vs || return false
     end
 
     # verify dependencies
@@ -144,14 +221,14 @@ function verify_solution(sol::Vector{Int}, interface::Interface)
             if sol[p0] == v0
                 for (rp, rvs) in a.requires
                     p1 = pdict[rp]
-                    @assert sol[p1] != spp[p1]
+                    sol[p1] != spp[p1] || return false
                     vn = pvers[p1][sol[p1]]
-                    @assert in(vn, rvs)
+                    vn in rvs || return false
                 end
             end
         end
     end
-
+    return true
 end
 
 # Push the given solution to a local optimium if needed
@@ -170,7 +247,7 @@ function enforce_optimality!(sol::Vector{Int}, interface::Interface)
     pdeps = [ Array(Requires, spp[p0]-1) for p0 = 1:np ]
     # prevdeps[p1][p0][v0] is the VersionSet of package p1 which package p0 version v0
     # depends upon
-    prevdeps = [ (Int=>Dict{Int,VersionSet})[] for p0 = 1:np ]
+    prevdeps = [ Dict{Int,Dict{Int,VersionSet}}() for p0 = 1:np ]
 
     for (p,d) in deps
         p0 = pdict[p]
@@ -181,7 +258,7 @@ function enforce_optimality!(sol::Vector{Int}, interface::Interface)
             for (rp, rvs) in a.requires
                 p1 = pdict[rp]
                 if !haskey(prevdeps[p1], p0)
-                    prevdeps[p1][p0] = (Int=>VersionSet)[]
+                    prevdeps[p1][p0] = Dict{Int,VersionSet}()
                 end
                 prevdeps[p1][p0][v0] = rvs
             end
@@ -225,7 +302,7 @@ function enforce_optimality!(sol::Vector{Int}, interface::Interface)
             # dependency of another package
             for (p1,d) in prevdeps[p0]
                 vs = get(d, sol[p1], nothing)
-                if vs == nothing
+                if vs === nothing
                     continue
                 end
                 vn = pvers[p0][s0+1]

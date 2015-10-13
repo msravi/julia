@@ -1,3 +1,5 @@
+// This file is a part of Julia. License is MIT: http://julialang.org/license
+
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
@@ -73,9 +75,12 @@ static int _enonfatal(int err)
 
 #define SLEEP_TIME 5//ms
 
-#ifdef __APPLE__
+#if defined(__APPLE__)
 #define MAXSIZE ((1l << 31) - 1)   // OSX cannot handle blocks larger than this
 #define LIMIT_IO_SIZE(n) ((n) < MAXSIZE ? (n) : MAXSIZE)
+#elif defined(_OS_WINDOWS_)
+#define MAXSIZE (0x7fffffff)       // Windows read() takes a uint
+#define LIMIT_IO_SIZE(n) ((n) < (size_t)MAXSIZE ? (unsigned int)(n) : MAXSIZE)
 #else
 #define LIMIT_IO_SIZE(n) (n)
 #endif
@@ -237,7 +242,7 @@ static size_t _ios_read(ios_t *s, char *dest, size_t n, int all)
 {
     size_t tot = 0;
     size_t got, avail;
-    //int result;
+    int didread = 0;
 
     if (s->state == bst_wr) {
         ios_seek(s, ios_pos(s));
@@ -246,14 +251,13 @@ static size_t _ios_read(ios_t *s, char *dest, size_t n, int all)
 
     while (n > 0) {
         avail = s->size - s->bpos;
-        
+
         if (avail > 0) {
             size_t ncopy = (avail >= n) ? n : avail;
             memcpy(dest, s->buf + s->bpos, ncopy);
             s->bpos += ncopy;
-            if (ncopy >= n) {
+            if (ncopy >= n)
                 return tot+ncopy;
-            }
         }
         if (s->bm == bm_mem || s->fd == -1) {
             // can't get any more data
@@ -261,14 +265,15 @@ static size_t _ios_read(ios_t *s, char *dest, size_t n, int all)
                 s->_eof = 1;
             return avail;
         }
-        
+
         dest += avail;
         n -= avail;
         tot += avail;
-        
+
+        if (didread && !all) return tot;
+
         ios_flush(s);
         s->bpos = s->size = 0;
-        
         s->fpos = -1;
         if (n > MOST_OF(s->maxsize)) {
             // doesn't fit comfortably in buffer; go direct
@@ -297,6 +302,7 @@ static size_t _ios_read(ios_t *s, char *dest, size_t n, int all)
             }
             s->size = got;
         }
+        didread = 1;
     }
 
     return tot;
@@ -550,6 +556,8 @@ int ios_trunc(ios_t *s, size_t size)
 
 int ios_eof(ios_t *s)
 {
+    if (s->state == bst_rd && s->bpos < s->size)
+        return 0;
     if (s->bm == bm_mem)
         return (s->_eof ? 1 : 0);
     if (s->fd == -1)
@@ -563,6 +571,20 @@ int ios_eof(ios_t *s)
     s->_eof = 1;
     return 1;
     */
+}
+
+int ios_eof_blocking(ios_t *s)
+{
+    if (s->state == bst_rd && s->bpos < s->size)
+        return 0;
+    if (s->bm == bm_mem)
+        return (s->_eof ? 1 : 0);
+    if (s->fd == -1)
+        return 1;
+
+    if (ios_readprep(s, 1) < 1)
+        return 1;
+    return 0;
 }
 
 int ios_flush(ios_t *s)
@@ -815,7 +837,26 @@ static void _ios_init(ios_t *s)
 
 /* stream object initializers. we do no allocation. */
 
-ios_t *ios_file(ios_t *s, char *fname, int rd, int wr, int create, int trunc)
+#if !defined(_OS_WINDOWS_)
+static int open_cloexec(const char *path, int flags, mode_t mode)
+{
+#ifdef O_CLOEXEC
+    static int no_cloexec=0;
+
+    if (!no_cloexec) {
+        int fd = open(path, flags | O_CLOEXEC, mode);
+        if (fd != -1)
+            return fd;
+        if (errno != EINVAL)
+            return -1;
+        no_cloexec = 1;
+    }
+#endif
+    return open(path, flags, mode);
+}
+#endif
+
+ios_t *ios_file(ios_t *s, const char *fname, int rd, int wr, int create, int trunc)
 {
     int flags;
     int fd;
@@ -826,14 +867,13 @@ ios_t *ios_file(ios_t *s, char *fname, int rd, int wr, int create, int trunc)
     if (create) flags |= O_CREAT;
     if (trunc)  flags |= O_TRUNC;
 #if defined(_OS_WINDOWS_)
-    size_t len = strlen(fname)+1;
-    size_t wlen = MultiByteToWideChar(CP_UTF8, 0, fname, len, NULL, 0);
+    size_t wlen = MultiByteToWideChar(CP_UTF8, 0, fname, -1, NULL, 0);
     if (!wlen) goto open_file_err;
     wchar_t *fname_w = (wchar_t*)alloca(wlen*sizeof(wchar_t));
-    if (!MultiByteToWideChar(CP_UTF8, 0, fname, len, fname_w, wlen)) goto open_file_err;
-    fd = _wopen(fname_w, flags | O_BINARY, _S_IREAD | _S_IWRITE);
+    if (!MultiByteToWideChar(CP_UTF8, 0, fname, -1, fname_w, wlen)) goto open_file_err;
+    fd = _wopen(fname_w, flags | O_BINARY | O_NOINHERIT, _S_IREAD | _S_IWRITE);
 #else
-    fd = open(fname, flags, S_IRUSR | S_IWUSR /* 0600 */ | S_IRGRP | S_IROTH /* 0644 */);
+    fd = open_cloexec(fname, flags, S_IRUSR | S_IWUSR /* 0600 */ | S_IRGRP | S_IROTH /* 0644 */);
 #endif
     s = ios_fd(s, fd, 1, 1);
     if (fd == -1)
@@ -844,6 +884,35 @@ ios_t *ios_file(ios_t *s, char *fname, int rd, int wr, int create, int trunc)
         s->writable = 0;
     return s;
  open_file_err:
+    s->fd = -1;
+    return NULL;
+}
+
+// Portable ios analogue of mkstemp: modifies fname to replace
+// trailing XXXX's with unique ID and returns the file handle s
+// for writing and reading.
+ios_t *ios_mkstemp(ios_t *s, char *fname)
+{
+    int fd;
+    // would be better to use a libuv function once it exists (see libuv/libuv#322)
+#ifdef _OS_WINDOWS_
+    size_t wlen = MultiByteToWideChar(CP_UTF8, 0, fname, -1, NULL, 0);
+    if (!wlen) goto open_file_err;
+    wchar_t *fname_w = (wchar_t*)alloca(wlen*sizeof(wchar_t));
+    if (!MultiByteToWideChar(CP_UTF8, 0, fname, -1, fname_w, wlen) ||
+        !_wmktemp(fname_w) ||
+        !WideCharToMultiByte(CP_UTF8, 0, fname_w, -1, fname, strlen(fname)+1,
+                             NULL, NULL))
+        goto open_file_err;
+    fd = _wopen(fname_w, O_CREAT|O_TRUNC|O_RDWR | O_BINARY | O_NOINHERIT, _S_IREAD | _S_IWRITE);
+#else
+    fd = mkstemp(fname);
+#endif
+    ios_fd(s, fd, 1, 1);
+    if (fd == -1)
+        goto open_file_err;
+    return s;
+open_file_err:
     s->fd = -1;
     return NULL;
 }

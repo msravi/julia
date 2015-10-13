@@ -115,7 +115,7 @@
       <item> FileMonitor </item>
       <item> FileOffset </item>
       <item> Filter </item>
-      <item> FloatingPoint </item>
+      <item> AbstractFloat </item>
       <item> Float16 </item>
       <item> Float32 </item>
       <item> Float64 </item>
@@ -139,10 +139,8 @@
       <item> IOStream </item>
       <item> LocalProcess </item>
       <item> LU </item>
-      <item> MathConst </item>
+      <item> Irrational </item>
       <item> Matrix </item>
-      <item> Nothing </item>
-      <item> None </item>
       <item> NTuple </item>
       <item> Number </item>
       <item> ObjectIdDict </item>
@@ -193,12 +191,12 @@
       <item> Tridiagonal </item>
       <item> Tuple </item>
       <item> Type </item>
-      <item> Uint </item>
-      <item> Uint8 </item>
-      <item> Uint16 </item>
-      <item> Uint32 </item>
-      <item> Uint64 </item>
-      <item> Uint128 </item>
+      <item> UInt </item>
+      <item> UInt8 </item>
+      <item> UInt16 </item>
+      <item> UInt32 </item>
+      <item> UInt64 </item>
+      <item> UInt128 </item>
       <item> Union </item>
       <item> Unsigned </item>
       <item> UTF8String </item>
@@ -209,7 +207,6 @@
       <item> Void </item>
       <item> WeakKeyDict </item>
       <item> WeakRef </item>
-      <item> Woodbury </item>
       <item> Zip </item>
       <item> AbstractRNG </item>
       <item> MersenneTwister </item>
@@ -253,6 +250,8 @@
       <item> Cssize_t </item>
       <item> Clonglong </item>
       <item> Culonglong </item>
+      <item> Cintmax_t </item>
+      <item> Cuintmax_t </item>
       <item> Coff_t </item>
       <item> Cfloat </item>
       <item> Cdouble </item>

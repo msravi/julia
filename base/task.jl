@@ -1,14 +1,70 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 ## basic task functions and TLS
 
-show(io::IO, t::Task) = print(io, "Task ($(t.state)) @0x$(hex(unsigned(pointer_from_objref(t)), WORD_SIZE>>2))")
+# allow tasks to be constructed with arbitrary function objects
+Task(f) = Task(()->f())
+
+function show(io::IO, t::Task)
+    print(io, "Task ($(t.state)) @0x$(hex(convert(UInt, pointer_from_objref(t)), WORD_SIZE>>2))")
+end
+
+# Container for a captured exception and its backtrace. Can be serialized.
+type CapturedException
+    ex::Any
+    processed_bt::Vector{Any}
+
+    function CapturedException(ex, bt_raw)
+        # bt_raw MUST be an Array of code pointers than can be processed by jl_lookup_code_address
+        # Typically the result of a catch_backtrace()
+
+        # Process bt_raw so that it can be safely serialized
+        bt_lines = Any[]
+        process_func(name, file, line, inlined_file, inlined_line, n) =
+            push!(bt_lines, (name, file, line, inlined_file, inlined_line, n))
+        process_backtrace(process_func, :(:), bt_raw, 1:100) # Limiting this to 100 lines.
+
+        new(ex, bt_lines)
+    end
+end
+
+showerror(io::IO, ce::CapturedException) = showerror(io, ce.ex, ce.processed_bt, backtrace=true)
+
+type CompositeException <: Exception
+    exceptions::Array
+    CompositeException() = new(Any[])
+end
+length(c::CompositeException) = length(c.exceptions)
+push!(c::CompositeException, ex) = push!(c.exceptions, ex)
+
+function showerror(io::IO, ex::CompositeException)
+    if length(ex) > 0
+        showerror(io, ex.exceptions[1])
+        remaining = length(ex) - 1
+        if remaining > 0
+            print(io, "\n\n...and $remaining other exceptions.\n")
+        end
+    else
+        print(io, "CompositeException()\n")
+    end
+end
+
 
 macro task(ex)
     :(Task(()->$(esc(ex))))
 end
 
+# schedule an expression to run asynchronously, with minimal ceremony
+macro schedule(expr)
+    expr = :(()->($expr))
+    :(enq_work(Task($(esc(expr)))))
+end
+
 current_task() = ccall(:jl_get_current_task, Any, ())::Task
 istaskdone(t::Task) = ((t.state == :done) | (t.state == :failed))
 istaskstarted(t::Task) = isdefined(t, :last)
+
+yieldto(t::Task, x::ANY = nothing) = ccall(:jl_switchto, Any, (Any, Any), t, x)
 
 # yield to a task, throwing an exception in it
 function throwto(t::Task, exc)
@@ -16,8 +72,8 @@ function throwto(t::Task, exc)
     yieldto(t)
 end
 
-function task_local_storage()
-    t = current_task()
+task_local_storage() = get_task_tls(current_task())
+function get_task_tls(t::Task)
     if is(t.storage, nothing)
         t.storage = ObjectIdDict()
     end
@@ -53,11 +109,17 @@ function wait(t::Task)
     return t.result
 end
 
+suppress_excp_printing(t::Task) = isa(t.storage, ObjectIdDict) ? get(get_task_tls(t), :SUPPRESS_EXCEPTION_PRINTING, false) : false
+
 # runtime system hook called when a task finishes
 function task_done_hook(t::Task)
     err = (t.state == :failed)
     result = t.result
     nexttask = t.last
+    handled = true
+    if err
+        t.backtrace = catch_backtrace()
+    end
 
     q = t.consumers
 
@@ -68,11 +130,16 @@ function task_done_hook(t::Task)
         nexttask.state = :runnable
     elseif isa(q,Condition) && !isempty(q.waitq)
         notify(q, result, error=err)
+    else
+        handled = false
     end
 
     t.consumers = nothing
 
-    isa(t.donenotify,Condition) && notify(t.donenotify, result, error=err)
+    if isa(t.donenotify,Condition)
+        handled |= !isempty(t.donenotify.waitq)
+        notify(t.donenotify, result, error=err)
+    end
 
     if nexttask.state == :runnable
         if err
@@ -80,7 +147,28 @@ function task_done_hook(t::Task)
         end
         yieldto(nexttask, result)
     else
-        wait()
+        if err && !handled
+            if isa(result,InterruptException) && isdefined(Base,:active_repl_backend) &&
+                active_repl_backend.backend_task.state == :waiting && isempty(Workqueue) &&
+                active_repl_backend.in_eval
+                throwto(active_repl_backend.backend_task, result)
+            end
+            if !suppress_excp_printing(t)
+                let bt = t.backtrace
+                    # run a new task to print the error for us
+                    @schedule with_output_color(:red, STDERR) do io
+                        print(io, "ERROR (unhandled task failure): ")
+                        showerror(io, result, bt)
+                        println(io)
+                    end
+                end
+            end
+        end
+        # if a finished task accidentally gets into the queue, wait()
+        # could return. in that case just take the next task off the queue.
+        while true
+            wait()
+        end
     end
 end
 
@@ -128,6 +216,11 @@ function produce(v)
         end
     else
         schedule(t, v)
+        # make sure `t` runs before us. otherwise, the producer might
+        # finish before `t` runs again, causing it to see the producer
+        # as done, causing done(::Task, _) to miss the value `v`.
+        # see issue #7727
+        yield()
         return q.waitq[1].result
     end
 end
@@ -176,7 +269,7 @@ isempty(::Task) = error("isempty not defined for Tasks")
 type Condition
     waitq::Vector{Any}
 
-    Condition() = new({})
+    Condition() = new([])
 end
 
 function wait(c::Condition)
@@ -196,7 +289,8 @@ function wait(c::Condition)
     end
 end
 
-function notify(c::Condition, arg::ANY=nothing; all=true, error=false)
+notify(c::Condition, arg::ANY=nothing; all=true, error=false) = notify(c, arg, all, error)
+function notify(c::Condition, arg, all, error)
     if all
         for t in c.waitq
             schedule(t, arg, error=error)
@@ -224,12 +318,6 @@ function enq_work(t::Task)
     push!(Workqueue, t)
     t.state = :queued
     t
-end
-
-# schedule an expression to run asynchronously, with minimal ceremony
-macro schedule(expr)
-    expr = localize_vars(:(()->($expr)), false)
-    :(enq_work(Task($(esc(expr)))))
 end
 
 schedule(t::Task) = enq_work(t)
@@ -287,13 +375,12 @@ end
 
 function pause()
     @unix_only    ccall(:pause, Void, ())
-    @windows_only ccall(:Sleep,stdcall, Void, (Uint32,), 0xffffffff)
+    @windows_only ccall(:Sleep,stdcall, Void, (UInt32,), 0xffffffff)
 end
 
 
 ## dynamically-scoped waiting for multiple items
-
-sync_begin() = task_local_storage(:SPAWNS, ({}, get(task_local_storage(), :SPAWNS, ())))
+sync_begin() = task_local_storage(:SPAWNS, ([], get(task_local_storage(), :SPAWNS, ())))
 
 function sync_end()
     spawns = get(task_local_storage(), :SPAWNS, ())
@@ -302,9 +389,26 @@ function sync_end()
     end
     refs = spawns[1]
     task_local_storage(:SPAWNS, spawns[2])
+
+    c_ex = CompositeException()
     for r in refs
-        wait(r)
+        try
+            wait(r)
+        catch ex
+            if !isa(r, Task) || (isa(r, Task) && !(r.state == :failed))
+                rethrow(ex)
+            end
+        finally
+            if isa(r, Task) && (r.state == :failed)
+                push!(c_ex, CapturedException(r.result, r.backtrace))
+            end
+        end
     end
+
+    if length(c_ex) > 0
+        throw(c_ex)
+    end
+    nothing
 end
 
 macro sync(block)
@@ -320,6 +424,10 @@ function sync_add(r)
     spawns = get(task_local_storage(), :SPAWNS, ())
     if !is(spawns,())
         push!(spawns[1], r)
+        if isa(r, Task)
+            tls_r = get_task_tls(r)
+            tls_r[:SUPPRESS_EXCEPTION_PRINTING] = true
+        end
     end
     r
 end

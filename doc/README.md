@@ -6,26 +6,25 @@ is the [Documenting Python](http://docs.python.org/devguide/documenting.html)
 chapter of the Python Developer's Guide.
 
 
-Building the documentation
---------------------------
+Prerequisites for building the documentation
+--------------------------------------------
 
 The documentation is built using [Sphinx](http://sphinx.pocoo.org/) and LaTeX.
 On ubuntu, you'll need the following packages installed:
 
-    python-sphinx
-    python-pip
     latex-cjk-all
     texlive
     texlive-lang-cjk
     texlive-latex-extra
 
-Use pip to install sphinx_rtd_theme:
+On OS X, you can install install MacTex using the GUI installer
 
-    $ sudo pip install sphinx_rtd_theme
 
-Then run
+Building the documentation
+--------------------------
 
-    $ make helpdb.jl
+Build the documentation by running
+
     $ make html
     $ make latexpdf
 
@@ -34,9 +33,8 @@ File layout
 -----------
 
     conf.py             Sphinx configuration
-    helpdb.jl           REPL help database
     stdlib/             Julia standard library documentation
-    UNDOCUMENTED.rst    Undocumented functions (to be filled in and copied to 
+    UNDOCUMENTED.rst    Undocumented functions (to be filled in and copied to
                         the correct location in stdlib/)
 
 Sphinx extensions and theme

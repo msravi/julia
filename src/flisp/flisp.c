@@ -54,7 +54,6 @@ extern "C" {
 
 #if defined(_OS_WINDOWS_) && !defined(_COMPILER_MINGW_)
 #include <malloc.h>
-DLLEXPORT char * basename(char *);
 DLLEXPORT char * dirname(char *);
 #else
 #include <libgen.h>
@@ -104,7 +103,7 @@ static value_t *GCHandleStack[N_GC_HANDLES];
 static uint32_t N_GCHND = 0;
 
 value_t FL_NIL, FL_T, FL_F, FL_EOF, QUOTE;
-value_t IOError, ParseError, TypeError, ArgError, UnboundError, MemoryError;
+value_t IOError, ParseError, TypeError, ArgError, UnboundError, OutOfMemoryError;
 value_t DivideError, BoundsError, Error, KeyError, EnumerationError;
 value_t printwidthsym, printreadablysym, printprettysym, printlengthsym;
 value_t printlevelsym, builtins_table_sym;
@@ -261,13 +260,15 @@ int fl_is_keyword_name(const char *str, size_t len)
     return len>1 && ((str[0] == ':' || str[len-1] == ':') && str[1] != '\0');
 }
 
+#define CHECK_ALIGN8(p) assert((((uptrint_t)(p))&0x7)==0 && "flisp requires malloc to return 8-aligned pointers")
+
 static symbol_t *mk_symbol(const char *str)
 {
     symbol_t *sym;
     size_t len = strlen(str);
 
     sym = (symbol_t*)malloc((sizeof(symbol_t)-sizeof(void*)+len+1+7)&-8);
-    assert(((uptrint_t)sym & 0x7) == 0); // make sure malloc aligns 8
+    CHECK_ALIGN8(sym);
     sym->left = sym->right = NULL;
     sym->flags = 0;
     if (fl_is_keyword_name(str, len)) {
@@ -289,7 +290,7 @@ static symbol_t **symtab_lookup(symbol_t **ptree, const char *str)
 {
     int x;
 
-    while(*ptree != NULL) {
+    while (*ptree != NULL) {
         x = strcmp(str, (*ptree)->name);
         if (x == 0)
             return ptree;
@@ -376,6 +377,7 @@ static value_t mk_cons(void)
     if (n_allocd > GC_INTERVAL)
         gc(0);
     c = (cons_t*)((void**)malloc(3*sizeof(void*)) + 1);
+    CHECK_ALIGN8(c);
     ((void**)c)[-1] = tochain;
     tochain = c;
     n_allocd += sizeof(cons_t);
@@ -398,6 +400,7 @@ static value_t *alloc_words(int n)
     if (n_allocd > GC_INTERVAL)
         gc(0);
     first = (value_t*)malloc((n+1)*sizeof(value_t)) + 1;
+    CHECK_ALIGN8(first);
     first[-1] = (value_t)tochain;
     tochain = first;
     n_allocd += (n*sizeof(value_t));
@@ -466,7 +469,7 @@ static inline int symchar(char c);
 void fl_gc_handle(value_t *pv)
 {
     if (N_GCHND >= N_GC_HANDLES)
-        lerror(MemoryError, "out of gc handles");
+        lerror(OutOfMemoryError, "out of gc handles");
     GCHandleStack[N_GCHND++] = pv;
 }
 
@@ -497,7 +500,10 @@ static value_t relocate(value_t v)
 #endif
             d = cdr_(v);
             car_(v) = TAG_FWD; cdr_(v) = nc;
-            car_(nc) = relocate(a);
+            if ((tag(a)&3) == 0 || !ismanaged(a))
+                car_(nc) = a;
+            else
+                car_(nc) = relocate(a);
             pcdr = &cdr_(nc);
             v = d;
         } while (iscons(v));
@@ -505,8 +511,7 @@ static value_t relocate(value_t v)
         return first;
     }
 
-    if ((t&3) == 0) return v;
-    if (!ismanaged(v)) return v;
+    if ((t&3) == 0 || !ismanaged(v)) return v;
     if (isforwarded(v)) return forwardloc(v);
 
     if (t == TAG_VECTOR) {
@@ -524,8 +529,13 @@ static value_t relocate(value_t v)
             forward(v, nc);
             if (sz > 0) {
                 vector_elt(nc,0) = relocate(a);
-                for(i=1; i < sz; i++)
-                    vector_elt(nc,i) = relocate(vector_elt(v,i));
+                for(i=1; i < sz; i++) {
+                    a = vector_elt(v,i);
+                    if ((tag(a)&3) == 0 || !ismanaged(a))
+                        vector_elt(nc,i) = a;
+                    else
+                        vector_elt(nc,i) = relocate(a);
+                }
             }
         }
         return nc;
@@ -608,8 +618,8 @@ void gc(int mustgrow)
 #endif
 
     if (fl_throwing_frame > curr_frame) {
-        top = fl_throwing_frame - 4;
-        f = Stack[fl_throwing_frame-4];
+        top = fl_throwing_frame - 3;
+        f = Stack[fl_throwing_frame-3];
     }
     else {
         top = SP;
@@ -619,8 +629,8 @@ void gc(int mustgrow)
         for (i=f; i < top; i++)
             Stack[i] = relocate(Stack[i]);
         if (f == 0) break;
-        top = f - 4;
-        f = Stack[f-4];
+        top = f - 3;
+        f = Stack[f-3];
     }
     for (i=0; i < N_GCHND; i++)
         *GCHandleStack[i] = relocate(*GCHandleStack[i]);
@@ -685,8 +695,12 @@ void gc(int mustgrow)
 #ifdef MEMDEBUG
     LLT_FREE(tospace);
 #endif
-    if (curheap > lim)  // all data was live
+    if ((value_t*)curheap > ((value_t*)lim)-2) {
+        // all data was live; gc again and grow heap.
+        // but also always leave at least 4 words available, so a closure
+        // can be allocated without an extra check.
         gc(0);
+    }
 #endif
 }
 
@@ -695,7 +709,7 @@ static void grow_stack(void)
     size_t newsz = N_STACK + (N_STACK>>1);
     value_t *ns = (value_t*)realloc(Stack, newsz*sizeof(value_t));
     if (ns == NULL)
-        lerror(MemoryError, "stack overflow");
+        lerror(OutOfMemoryError, "stack overflow");
     Stack = ns;
     N_STACK = newsz;
 }
@@ -960,9 +974,8 @@ static uint32_t process_keys(value_t kwtable,
     value_t v;
     uint32_t i, a = 0, nrestargs;
     value_t s1 = Stack[SP-1];
-    value_t s2 = Stack[SP-2];
+    value_t s3 = Stack[SP-3];
     value_t s4 = Stack[SP-4];
-    value_t s5 = Stack[SP-5];
     if (nargs < nreq)
         lerror(ArgError, "apply: too few arguments");
     for (i=0; i < extr; i++) args[i] = UNBOUND;
@@ -1009,11 +1022,10 @@ static uint32_t process_keys(value_t kwtable,
         memmove(&Stack[bp+ntot], &Stack[bp+i], nrestargs*sizeof(value_t));
     memcpy(&Stack[bp+nreq], args, extr*sizeof(value_t));
     SP = bp + nargs;
-    assert(SP < N_STACK-5);
-    PUSH(s5);
+    assert(SP < N_STACK-4);
     PUSH(s4);
+    PUSH(s3);
     PUSH(nargs);
-    PUSH(s2);
     PUSH(s1);
     curr_frame = SP;
     return nargs;
@@ -1066,7 +1078,7 @@ static value_t apply_cl(uint32_t nargs)
     VM_APPLY_LABELS;
     uint32_t top_frame = curr_frame;
     // frame variables
-    uint32_t n=0, captured;
+    uint32_t n=0;
     uint32_t bp;
     const uint8_t *ip;
     fixnum_t s, hi;
@@ -1083,7 +1095,6 @@ static value_t apply_cl(uint32_t nargs)
     static value_t func, v, e;
 
  apply_cl_top:
-    captured = 0;
     func = Stack[SP-nargs-1];
     ip = (uint8_t*)cv_data((cvalue_t*)ptr(fn_bcode(func)));
 #ifndef MEMDEBUG2
@@ -1099,7 +1110,6 @@ static value_t apply_cl(uint32_t nargs)
     PUSH(curr_frame);
     PUSH(nargs);
     SP++;//PUSH(0); //ip
-    PUSH(0); //captured?
     curr_frame = SP;
 
     {
@@ -1133,9 +1143,8 @@ static value_t apply_cl(uint32_t nargs)
                     Stack[bp+i+1] = Stack[bp+nargs+0];
                     Stack[bp+i+2] = Stack[bp+nargs+1];
                     Stack[bp+i+3] = i+1;
-                    //Stack[bp+i+4] = 0;
-                    Stack[bp+i+5] = 0;
-                    SP =  bp+i+6;
+                    Stack[bp+i+4] = 0;
+                    SP =  bp+i+5;
                     curr_frame = SP;
                 }
             }
@@ -1143,11 +1152,11 @@ static value_t apply_cl(uint32_t nargs)
                 lerror(ArgError, "apply: too few arguments");
             }
             else {
-                PUSH(0);
-                Stack[SP-3] = i+1;
+                SP++;
+                Stack[SP-2] = i+1;
+                Stack[SP-3] = Stack[SP-4];
                 Stack[SP-4] = Stack[SP-5];
-                Stack[SP-5] = Stack[SP-6];
-                Stack[SP-6] = NIL;
+                Stack[SP-5] = NIL;
                 curr_frame = SP;
             }
             nargs = i+1;
@@ -1160,10 +1169,7 @@ static value_t apply_cl(uint32_t nargs)
             goto do_vargc;
         OP(OP_BRBOUND)
             i = GET_INT32(ip); ip+=4;
-            if (captured)
-                v = vector_elt(Stack[bp], i);
-            else
-                v = Stack[bp+i];
+            v = Stack[bp+i];
             if (v != UNBOUND) PUSH(FL_T);
             else PUSH(FL_F);
             NEXT_OP;
@@ -1175,7 +1181,7 @@ static value_t apply_cl(uint32_t nargs)
             func = Stack[SP-n-1];
             if (tag(func) == TAG_FUNCTION) {
                 if (func > (N_BUILTINS<<3)) {
-                    curr_frame = Stack[curr_frame-4];
+                    curr_frame = Stack[curr_frame-3];
                     for(s=-1; s < (fixnum_t)n; s++)
                         Stack[bp+s] = Stack[SP-n+s];
                     SP = bp+n;
@@ -1230,7 +1236,7 @@ static value_t apply_cl(uint32_t nargs)
             func = Stack[SP-n-1];
             if (tag(func) == TAG_FUNCTION) {
                 if (func > (N_BUILTINS<<3)) {
-                    Stack[curr_frame-2] = (uptrint_t)ip;
+                    Stack[curr_frame-1] = (uptrint_t)ip;
                     nargs = n;
                     goto apply_cl_top;
                 }
@@ -1330,13 +1336,12 @@ static value_t apply_cl(uint32_t nargs)
         OP(OP_RET)
             v = POP();
             SP = curr_frame;
-            curr_frame = Stack[SP-4];
+            curr_frame = Stack[SP-3];
             if (curr_frame == top_frame) return v;
-            SP -= (5+nargs);
-            captured     = Stack[curr_frame-1];
-            ip = (uint8_t*)Stack[curr_frame-2];
-            nargs        = Stack[curr_frame-3];
-            bp           = curr_frame - 5 - nargs;
+            SP -= (4+nargs);
+            ip = (uint8_t*)Stack[curr_frame-1];
+            nargs        = Stack[curr_frame-2];
+            bp           = curr_frame - 4 - nargs;
             Stack[SP-1] = v;
             NEXT_OP;
 
@@ -1746,133 +1751,93 @@ static value_t apply_cl(uint32_t nargs)
             NEXT_OP;
 
         OP(OP_LOADA)
-            assert(nargs > 0);
             i = *ip++;
-            if (captured) {
-                e = Stack[bp];
-                assert(isvector(e));
-                assert(i < vector_size(e));
-                v = vector_elt(e, i);
-            }
-            else {
-                v = Stack[bp+i];
-            }
+            v = Stack[bp+i];
             PUSH(v);
             NEXT_OP;
         OP(OP_LOADA0)
-            if (captured)
-                v = vector_elt(Stack[bp], 0);
-            else
-                v = Stack[bp];
+            v = Stack[bp];
             PUSH(v);
             NEXT_OP;
         OP(OP_LOADA1)
-            if (captured)
-                v = vector_elt(Stack[bp], 1);
-            else
-                v = Stack[bp+1];
+            v = Stack[bp+1];
             PUSH(v);
             NEXT_OP;
         OP(OP_LOADAL)
-            assert(nargs > 0);
             i = GET_INT32(ip); ip+=4;
-            if (captured)
-                v = vector_elt(Stack[bp], i);
-            else
-                v = Stack[bp+i];
+            v = Stack[bp+i];
             PUSH(v);
             NEXT_OP;
         OP(OP_SETA)
-            assert(nargs > 0);
             v = Stack[SP-1];
             i = *ip++;
-            if (captured) {
-                e = Stack[bp];
-                assert(isvector(e));
-                assert(i < vector_size(e));
-                vector_elt(e, i) = v;
-            }
-            else {
-                Stack[bp+i] = v;
-            }
+            Stack[bp+i] = v;
             NEXT_OP;
         OP(OP_SETAL)
-            assert(nargs > 0);
             v = Stack[SP-1];
             i = GET_INT32(ip); ip+=4;
-            if (captured)
-                vector_elt(Stack[bp], i) = v;
-            else
-                Stack[bp+i] = v;
+            Stack[bp+i] = v;
             NEXT_OP;
+
+        OP(OP_BOX)
+            i = *ip++;
+            v = mk_cons();
+            car_(v) = Stack[bp+i];
+            cdr_(v) = NIL;
+            Stack[bp+i] = v;
+            NEXT_OP;
+        OP(OP_BOXL)
+            i = GET_INT32(ip); ip+=4;
+            v = mk_cons();
+            car_(v) = Stack[bp+i];
+            cdr_(v) = NIL;
+            Stack[bp+i] = v;
+            NEXT_OP;
+
+        OP(OP_SHIFT)
+            i = *ip++;
+            Stack[SP-1-i] = Stack[SP-1];
+            SP -= i;
+            NEXT_OP;
+
         OP(OP_LOADC)
-            s = *ip++;
             i = *ip++;
             v = Stack[bp+nargs];
-            while (s--)
-                v = vector_elt(v, vector_size(v)-1);
             assert(isvector(v));
             assert(i < vector_size(v));
             PUSH(vector_elt(v, i));
             NEXT_OP;
-        OP(OP_SETC)
-            s = *ip++;
-            i = *ip++;
-            v = Stack[bp+nargs];
-            while (s--)
-                v = vector_elt(v, vector_size(v)-1);
-            assert(isvector(v));
-            assert(i < vector_size(v));
-            vector_elt(v, i) = Stack[SP-1];
-            NEXT_OP;
-        OP(OP_LOADC00)
+
+        OP(OP_LOADC0)
             PUSH(vector_elt(Stack[bp+nargs], 0));
             NEXT_OP;
-        OP(OP_LOADC01)
+        OP(OP_LOADC1)
             PUSH(vector_elt(Stack[bp+nargs], 1));
             NEXT_OP;
+
         OP(OP_LOADCL)
-            s = GET_INT32(ip); ip+=4;
             i = GET_INT32(ip); ip+=4;
             v = Stack[bp+nargs];
-            while (s--)
-                v = vector_elt(v, vector_size(v)-1);
             PUSH(vector_elt(v, i));
-            NEXT_OP;
-        OP(OP_SETCL)
-            s = GET_INT32(ip); ip+=4;
-            i = GET_INT32(ip); ip+=4;
-            v = Stack[bp+nargs];
-            while (s--)
-                v = vector_elt(v, vector_size(v)-1);
-            vector_elt(v, i) = Stack[SP-1];
             NEXT_OP;
 
         OP(OP_CLOSURE)
-            // build a closure (lambda args body . env)
-            if (nargs > 0 && !captured) {
-                // save temporary environment to the heap
-                n = nargs;
-                pv = alloc_words(n + 2);
-                PUSH(tagptr(pv, TAG_VECTOR));
-                pv[0] = fixnum(n+1);
-                pv++;
-                do {
-                    pv[n] = Stack[bp+n];
-                } while (n--);
-                // environment representation changed; install
-                // the new representation so everybody can see it
-                captured = 1;
-                Stack[curr_frame-1] = 1;
-                Stack[bp] = Stack[SP-1];
-            }
-            else {
-                PUSH(Stack[bp]); // env has already been captured; share
-            }
+            n = *ip++;
+            assert(n > 0);
+            pv = alloc_words(n + 1);
+            v = tagptr(pv, TAG_VECTOR);
+            pv[0] = fixnum(n);
+            i = 1;
+            do {
+                pv[i] = Stack[SP-n + i-1];
+                i++;
+            } while (i<=n);
+            POPN(n);
+            PUSH(v);
 #ifdef MEMDEBUG2
             pv = alloc_words(4);
 #else
-            if (curheap > lim-2)
+            if ((value_t*)curheap > ((value_t*)lim)-2)
                 gc(0);
             pv = (value_t*)curheap;
             curheap += (4*sizeof(value_t));
@@ -1907,10 +1872,9 @@ static value_t apply_cl(uint32_t nargs)
                 n -= nargs;
                 SP += n;
                 Stack[SP-1] = Stack[SP-n-1];
-                Stack[SP-2] = Stack[SP-n-2];
-                Stack[SP-3] = nargs+n;
+                Stack[SP-2] = nargs+n;
+                Stack[SP-3] = Stack[SP-n-3];
                 Stack[SP-4] = Stack[SP-n-4];
-                Stack[SP-5] = Stack[SP-n-5];
                 curr_frame = SP;
                 for(i=0; i < n; i++) {
                     Stack[bp+nargs+i] = UNBOUND;
@@ -1924,7 +1888,7 @@ static value_t apply_cl(uint32_t nargs)
             i = GET_INT32(ip); ip+=4;
             n = GET_INT32(ip); ip+=4;
             s = GET_INT32(ip); ip+=4;
-            nargs = process_keys(v, i, n, abs(s)-(i+n), bp, nargs, s<0);
+            nargs = process_keys(v, i, n, llabs(s)-(i+n), bp, nargs, s<0);
             NEXT_OP;
 
 #ifndef USE_COMPUTED_GOTO
@@ -2046,7 +2010,7 @@ static uint32_t compute_maxstack(uint8_t *code, size_t len, int bswap)
         case OP_PAIRP: case OP_ATOMP: case OP_NOT: case OP_NULLP:
         case OP_BOOLEANP: case OP_SYMBOLP: case OP_NUMBERP: case OP_FIXNUMP:
         case OP_BOUNDP: case OP_BUILTINP: case OP_FUNCTIONP: case OP_VECTORP:
-        case OP_NOP: case OP_CAR: case OP_CDR: case OP_NEG: case OP_CLOSURE:
+        case OP_NOP: case OP_CAR: case OP_CDR: case OP_NEG:
             break;
 
         case OP_TAPPLY: case OP_APPLY:
@@ -2059,6 +2023,14 @@ static uint32_t compute_maxstack(uint8_t *code, size_t len, int bswap)
             n = *ip++;
             sp -= (n-1);
             break;
+        case OP_CLOSURE:
+            n = *ip++;
+            sp -= n;
+            break;
+        case OP_SHIFT:
+            n = *ip++;
+            sp -= n;
+            break;
 
         case OP_ASET:
             sp -= 2;
@@ -2069,8 +2041,8 @@ static uint32_t compute_maxstack(uint8_t *code, size_t len, int bswap)
             break;
 
         case OP_LOADT: case OP_LOADF: case OP_LOADNIL: case OP_LOAD0:
-        case OP_LOAD1: case OP_LOADA0: case OP_LOADA1: case OP_LOADC00:
-        case OP_LOADC01: case OP_DUP:
+        case OP_LOAD1: case OP_LOADA0: case OP_LOADA1: case OP_DUP:
+        case OP_LOADC0: case OP_LOADC1:
             sp++;
             break;
 
@@ -2084,33 +2056,22 @@ static uint32_t compute_maxstack(uint8_t *code, size_t len, int bswap)
             sp++;
             break;
 
-        case OP_SETG: case OP_SETA:
+        case OP_SETG: case OP_SETA: case OP_BOX:
             ip++;
             break;
-        case OP_SETGL: case OP_SETAL:
+        case OP_SETGL: case OP_SETAL: case OP_BOXL:
             if (bswap) SWAP_INT32(ip);
             ip+=4;
             break;
 
-        case OP_LOADC: ip+=2; sp++; break;
-        case OP_SETC:
-            ip+=2;
-            break;
+        case OP_LOADC: ip+=1; sp++; break;
         case OP_LOADCL:
             if (bswap) SWAP_INT32(ip);
             ip+=4;
-            if (bswap) SWAP_INT32(ip);
-            ip+=4;
             sp++; break;
-        case OP_SETCL:
-            if (bswap) SWAP_INT32(ip);
-            ip+=4;
-            if (bswap) SWAP_INT32(ip);
-            ip+=4;
-            break;
         }
     }
-    return maxsp+5;
+    return maxsp+4;
 }
 
 // top = top frame pointer to start at
@@ -2120,19 +2081,12 @@ static value_t _stacktrace(uint32_t top)
     value_t v, lst = NIL;
     fl_gc_handle(&lst);
     while (top > 0) {
-        sz = Stack[top-3]+1;
-        bp = top-5-sz;
+        sz = Stack[top-2]+1;
+        bp = top-4-sz;
         v = alloc_vector(sz, 0);
-        if (Stack[top-1] /*captured*/) {
-            vector_elt(v, 0) = Stack[bp];
-            memcpy(&vector_elt(v, 1),
-                   &vector_elt(Stack[bp+1],0), (sz-1)*sizeof(value_t));
-        }
-        else {
-            memcpy(&vector_elt(v,0), &Stack[bp], sz*sizeof(value_t));
-        }
+        memcpy(&vector_elt(v,0), &Stack[bp], sz*sizeof(value_t));
         lst = fl_cons(v, lst);
-        top = Stack[top-4];
+        top = Stack[top-3];
     }
     fl_free_gc_handles(1);
     return lst;
@@ -2292,9 +2246,9 @@ value_t fl_map1(value_t *args, u_int32_t nargs)
     if (nargs < 2)
         lerror(ArgError, "map: too few arguments");
     if (!iscons(args[1])) return NIL;
-    value_t *first, *last, v;
-    int64_t argSP = args-Stack;
-    assert(argSP >= 0 && argSP < N_STACK);
+    value_t v;
+    uint32_t first, last, argSP = args-Stack;
+    assert(args >= Stack && argSP < N_STACK);
     if (nargs == 2) {
         if (SP+4 > N_STACK) grow_stack();
         PUSH(Stack[argSP]);
@@ -2306,8 +2260,8 @@ value_t fl_map1(value_t *args, u_int32_t nargs)
         car_(v) = POP(); cdr_(v) = NIL;
         PUSH(v);
         PUSH(v);
-        first = &Stack[SP-2];
-        last = &Stack[SP-1];
+        first = SP-2;
+        last = SP-1;
         Stack[argSP+1] = cdr_(Stack[argSP+1]);
         while (iscons(Stack[argSP+1])) {
             PUSH(Stack[argSP]);
@@ -2317,8 +2271,8 @@ value_t fl_map1(value_t *args, u_int32_t nargs)
             PUSH(v);
             v = mk_cons();
             car_(v) = POP(); cdr_(v) = NIL;
-            cdr_(*last) = v;
-            *last = v;
+            cdr_(Stack[last]) = v;
+            Stack[last] = v;
             Stack[argSP+1] = cdr_(Stack[argSP+1]);
         }
         POPN(2);
@@ -2338,8 +2292,8 @@ value_t fl_map1(value_t *args, u_int32_t nargs)
         car_(v) = POP(); cdr_(v) = NIL;
         PUSH(v);
         PUSH(v);
-        first = &Stack[SP-2];
-        last = &Stack[SP-1];
+        first = SP-2;
+        last = SP-1;
         while (iscons(Stack[argSP+1])) {
             PUSH(Stack[argSP]);
             for(i=1; i < nargs; i++) {
@@ -2351,12 +2305,12 @@ value_t fl_map1(value_t *args, u_int32_t nargs)
             PUSH(v);
             v = mk_cons();
             car_(v) = POP(); cdr_(v) = NIL;
-            cdr_(*last) = v;
-            *last = v;
+            cdr_(Stack[last]) = v;
+            Stack[last] = v;
         }
         POPN(2);
     }
-    return *first;
+    return Stack[first];
 }
 
 static builtinspec_t core_builtin_info[] = {
@@ -2402,6 +2356,7 @@ static void lisp_init(size_t initial_heapsize)
     comparehash_init();
     N_STACK = 262144;
     Stack = (value_t*)malloc(N_STACK*sizeof(value_t));
+    CHECK_ALIGN8(Stack);
 
     FL_NIL = NIL = builtin(OP_THE_EMPTY_LIST);
     FL_T = builtin(OP_BOOL_CONST_T);
@@ -2414,7 +2369,7 @@ static void lisp_init(size_t initial_heapsize)
     IOError = symbol("io-error");     ParseError = symbol("parse-error");
     TypeError = symbol("type-error"); ArgError = symbol("arg-error");
     UnboundError = symbol("unbound-error");
-    KeyError = symbol("key-error");   MemoryError = symbol("memory-error");
+    KeyError = symbol("key-error");   OutOfMemoryError = symbol("memory-error");
     BoundsError = symbol("bounds-error");
     DivideError = symbol("divide-error");
     EnumerationError = symbol("enumeration-error");
@@ -2470,7 +2425,7 @@ static void lisp_init(size_t initial_heapsize)
         setc(symbol("*install-dir*"), cvalue_static_cstring(strdup(dirname(exename))));
     }
 
-    memory_exception_value = fl_list2(MemoryError,
+   memory_exception_value = fl_list2(OutOfMemoryError,
                                       cvalue_static_cstring("out of memory"));
 
     assign_global_builtins(core_builtin_info);
@@ -2492,6 +2447,18 @@ void fl_init(size_t initial_heapsize)
     lisp_init(initial_heapsize);
     fl_init_julia_extensions();
 }
+
+extern fltype_t *iostreamtype;
+
+int fl_load_system_image_str(char *str, size_t len)
+{
+    value_t img = cvalue(iostreamtype, sizeof(ios_t));
+    ios_t *pi = value2c(ios_t*, img);
+    ios_static_buffer(pi, str, len);
+
+    return fl_load_system_image(img);
+}
+
 
 int fl_load_system_image(value_t sys_image_iostream)
 {

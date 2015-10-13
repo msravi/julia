@@ -1,76 +1,87 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 module Generate
 
-import ..Git, ..Read
+import ...LibGit2, ..Read, ...Pkg.PkgError
+importall ...LibGit2
 
-copyright_year() = readchomp(`date +%Y`)
-copyright_name() = readchomp(`git config --global --get user.name`)
-github_user() = readchomp(ignorestatus(`git config --global --get github.user`))
+copyright_year() =  string(Dates.year(Dates.today()))
+copyright_name(repo::GitRepo) = LibGit2.getconfig(repo, "user.name", "")
+github_user() = LibGit2.getconfig("github.user", "")
 
-function git_contributors(dir::String, n::Int=typemax(Int))
+function git_contributors(repo::GitRepo, n::Int=typemax(Int))
     contrib = Dict()
-    tty = @windows? "CON:" : "/dev/tty"
-    for line in eachline(tty |> Git.cmd(`shortlog -nes`, dir=dir))
-        m = match(r"\s*(\d+)\s+(.+?)\s+\<(.+?)\>\s*$", line)
-        m == nothing && continue
-        commits, name, email = m.captures
-        if haskey(contrib,email)
-            contrib[email][1] += int(commits)
+    for sig in LibGit2.authors(repo)
+        if haskey(contrib, sig.email)
+            contrib[sig.email][1] += 1
         else
-            contrib[email] = [int(commits),name]
+            contrib[sig.email] = [1, sig.name]
         end
     end
+
     names = Dict()
     for (commits,name) in values(contrib)
         names[name] = get(names,name,0) + commits
     end
     names = sort!(collect(keys(names)),by=name->names[name],rev=true)
-    length(names) <= n ? names : [names[1:n], "et al."]
+    length(names) <= n ? names : [names[1:n]; "et al."]
 end
 
 function package(
-    pkg::String,
-    license::String;
+    pkg::AbstractString,
+    license::AbstractString;
     force::Bool = false,
-    authors::String = "",
-    years::Union(Int,String) = copyright_year(),
-    user::String = github_user(),
+    authors::Union{AbstractString,Array} = "",
+    years::Union{Int,AbstractString} = copyright_year(),
+    user::AbstractString = github_user(),
+    config::Dict = Dict(),
 )
     isnew = !ispath(pkg)
     try
-        if isnew
-            url = isempty(user) ? "" : "git://github.com/$user/$pkg.jl.git"
-            Generate.init(pkg,url)
+        repo = if isnew
+            url = isempty(user) ? "" : "https://github.com/$user/$pkg.jl.git"
+            Generate.init(pkg,url,config=config)
         else
-            Git.dirty(dir=pkg) && error("$pkg is dirty – commit or stash your changes")
-        end
-        Git.transact(dir=pkg) do
-            if isempty(authors)
-                authors = isnew ? copyright_name() : git_contributors(pkg,5)
+            repo = GitRepo(pkg)
+            if LibGit2.isdirty(repo)
+                finalize(repo)
+                throw(PkgError("$pkg is dirty – commit or stash your changes"))
             end
-            Generate.license(pkg,license,years,authors,force=force)
-            Generate.readme(pkg,user,force=force)
-            Generate.entrypoint(pkg,force=force)
-            Generate.tests(pkg,force=force)
-            Generate.travis(pkg,force=force)
+            repo
+        end
+
+        LibGit2.transact(repo) do repo
+            if isempty(authors)
+                authors = isnew ? copyright_name(repo) : git_contributors(repo,5)
+            end
+
+            files = [Generate.license(pkg,license,years,authors,force=force),
+                     Generate.readme(pkg,user,force=force),
+                     Generate.entrypoint(pkg,force=force),
+                     Generate.tests(pkg,force=force),
+                     Generate.require(pkg,force=force),
+                     Generate.travis(pkg,force=force),
+                     Generate.appveyor(pkg,force=force),
+                     Generate.gitignore(pkg,force=force) ]
 
             msg = """
             $pkg.jl $(isnew ? "generated" : "regenerated") files.
 
                 license:  $license
-                authors:  $(join([authors],", "))
+                authors:  $(join(vcat(authors),", "))
                 years:    $years
                 user:     $user
 
             Julia Version $VERSION [$(Base.GIT_VERSION_INFO.commit_short)]
             """
-
+            LibGit2.add!(repo, files..., flags = LibGit2.Consts.INDEX_ADD_FORCE)
             if isnew
                 info("Committing $pkg generated files")
-                Git.run(`commit -q -m $msg`, dir=pkg)
-            elseif Git.dirty(dir=pkg)
-                Git.run(`reset -q --`, dir=pkg)
+                LibGit2.commit(repo, msg)
+            elseif LibGit2.isdirty(repo)
+                LibGit2.remove!(repo, files...)
                 info("Regenerated files left unstaged, use `git add -p` to select")
-                open(io->print(io,msg), joinpath(Git.dir(pkg),"MERGE_MSG"), "w")
+                open(io->print(io,msg), joinpath(LibGit2.gitdir(repo),"MERGE_MSG"), "w")
             else
                 info("Regenerated files are unchanged")
             end
@@ -79,34 +90,66 @@ function package(
         isnew && rm(pkg, recursive=true)
         rethrow()
     end
+    return
 end
 
-function init(pkg::String, url::String="")
+function init(pkg::AbstractString, url::AbstractString=""; config::Dict=Dict())
     if !ispath(pkg)
         info("Initializing $pkg repo: $(abspath(pkg))")
-        Git.run(`init -q $pkg`)
-        Git.run(`commit -q --allow-empty -m "initial empty commit"`, dir=pkg)
+        repo = LibGit2.init(pkg)
+        try
+            with(GitConfig, repo) do cfg
+                for (key,val) in config
+                    LibGit2.set!(cfg, key, val)
+                end
+            end
+            LibGit2.commit(repo, "initial empty commit")
+        catch err
+            throw(PkgError("Unable to initialize $pkg package: $err"))
+        end
+    else
+        repo = GitRepo(pkg)
     end
-    isempty(url) && return
-    info("Origin: $url")
-    Git.run(`remote add origin $url`,dir=pkg)
-    Git.set_remote_url(url,dir=pkg)
+    try
+        if !isempty(url)
+            info("Origin: $url")
+            with(LibGit2.GitRemote, repo, "origin", url) do rmt
+                LibGit2.save(rmt)
+            end
+            LibGit2.set_remote_url(repo, url)
+        end
+    end
+    return repo
 end
 
-function license(pkg::String, license::String,
-                 years::Union(Int,String),
-                 authors::Union(String,Array);
+function genfile(f::Function, pkg::AbstractString, file::AbstractString, force::Bool=false)
+    path = joinpath(pkg,file)
+    if force || !ispath(path)
+        info("Generating $file")
+        mkpath(dirname(path))
+        open(f, path, "w")
+        return file
+    end
+    return ""
+end
+
+function license(pkg::AbstractString,
+                 license::AbstractString,
+                 years::Union{Int,AbstractString},
+                 authors::Union{AbstractString,Array};
                  force::Bool=false)
-    genfile(pkg,"LICENSE.md",force) do io
+    file = genfile(pkg,"LICENSE.md",force) do io
         if !haskey(LICENSES,license)
-            licenses = join(sort!([keys(LICENSES)...], by=lowercase), ", ")
-            error("$license is not a known license choice, choose one of: $licenses.")
+            licenses = join(sort!(collect(keys(LICENSES)), by=lowercase), ", ")
+            throw(PkgError("$license is not a known license choice, choose one of: $licenses."))
         end
         print(io, LICENSES[license](pkg, string(years), authors))
-    end || info("License file exists, leaving unmodified; use `force=true` to overwrite")
+    end
+    !isempty(file) || info("License file exists, leaving unmodified; use `force=true` to overwrite")
+    file
 end
 
-function readme(pkg::String, user::String=""; force::Bool=false)
+function readme(pkg::AbstractString, user::AbstractString=""; force::Bool=false)
     genfile(pkg,"README.md",force) do io
         println(io, "# $pkg")
         isempty(user) && return
@@ -115,7 +158,7 @@ function readme(pkg::String, user::String=""; force::Bool=false)
     end
 end
 
-function tests(pkg::String; force::Bool=false)
+function tests(pkg::AbstractString; force::Bool=false)
     genfile(pkg,"test/runtests.jl",force) do io
         print(io, """
         using $pkg
@@ -127,31 +170,109 @@ function tests(pkg::String; force::Bool=false)
     end
 end
 
-function travis(pkg::String; force::Bool=false)
-    genfile(pkg,".travis.yml",force) do io
+function versionfloor(ver::VersionNumber)
+    # return "major.minor" for the most recent release version relative to ver
+    # for prereleases with ver.minor == ver.patch == 0, return "major-" since we
+    # don't know what the most recent minor version is for the previous major
+    if isempty(ver.prerelease) || ver.patch > 0
+        return string(ver.major, '.', ver.minor)
+    elseif ver.minor > 0
+        return string(ver.major, '.', ver.minor - 1)
+    else
+        return string(ver.major, '-')
+    end
+end
+
+function require(pkg::AbstractString; force::Bool=false)
+    genfile(pkg,"REQUIRE",force) do io
         print(io, """
-        language: cpp
-        compiler:
-          - clang
-        notifications:
-          email: false
-        env:
-          matrix:
-            - JULIAVERSION="juliareleases"
-            - JULIAVERSION="julianightlies"
-        before_install:
-          - sudo add-apt-repository ppa:staticfloat/julia-deps -y
-          - sudo add-apt-repository ppa:staticfloat/\${JULIAVERSION} -y
-          - sudo apt-get update -qq -y
-          - sudo apt-get install libpcre3-dev julia -y
-          - if [[ -a .git/shallow ]]; then git fetch --unshallow; fi
-        script:
-          - julia -e 'Pkg.init(); Pkg.clone(pwd()); Pkg.test("$pkg")'
+        julia $(versionfloor(VERSION))
         """)
     end
 end
 
-function entrypoint(pkg::String; force::Bool=false)
+function travis(pkg::AbstractString; force::Bool=false)
+    genfile(pkg,".travis.yml",force) do io
+        print(io, """
+        # Documentation: http://docs.travis-ci.com/user/languages/julia/
+        language: julia
+        os:
+          - linux
+          - osx
+        julia:
+          - release
+          - nightly
+        notifications:
+          email: false
+        # uncomment the following lines to override the default test script
+        #script:
+        #  - if [[ -a .git/shallow ]]; then git fetch --unshallow; fi
+        #  - julia -e 'Pkg.clone(pwd()); Pkg.build("$pkg"); Pkg.test("$pkg"; coverage=true)'
+        """)
+    end
+end
+
+function appveyor(pkg::AbstractString; force::Bool=false)
+    vf = versionfloor(VERSION)
+    if vf[end] == '-' # don't know what previous release was
+        vf = string(VERSION.major, '.', VERSION.minor)
+        rel32 = "#  - JULIAVERSION: \"julialang/bin/winnt/x86/$vf/julia-$vf-latest-win32.exe\""
+        rel64 = "#  - JULIAVERSION: \"julialang/bin/winnt/x64/$vf/julia-$vf-latest-win64.exe\""
+    else
+        rel32 = "  - JULIAVERSION: \"julialang/bin/winnt/x86/$vf/julia-$vf-latest-win32.exe\""
+        rel64 = "  - JULIAVERSION: \"julialang/bin/winnt/x64/$vf/julia-$vf-latest-win64.exe\""
+    end
+    genfile(pkg,"appveyor.yml",force) do io
+        print(io, """
+        environment:
+          matrix:
+        $rel32
+        $rel64
+          - JULIAVERSION: "julianightlies/bin/winnt/x86/julia-latest-win32.exe"
+          - JULIAVERSION: "julianightlies/bin/winnt/x64/julia-latest-win64.exe"
+
+        branches:
+          only:
+            - master
+            - /release-.*/
+
+        notifications:
+          - provider: Email
+            on_build_success: false
+            on_build_failure: false
+            on_build_status_changed: false
+
+        install:
+        # Download most recent Julia Windows binary
+          - ps: (new-object net.webclient).DownloadFile(
+                \$("http://s3.amazonaws.com/"+\$env:JULIAVERSION),
+                "C:\\projects\\julia-binary.exe")
+        # Run installer silently, output to C:\\projects\\julia
+          - C:\\projects\\julia-binary.exe /S /D=C:\\projects\\julia
+
+        build_script:
+        # Need to convert from shallow to complete for Pkg.clone to work
+          - IF EXIST .git\\shallow (git fetch --unshallow)
+          - C:\\projects\\julia\\bin\\julia -e "versioninfo();
+              Pkg.clone(pwd(), \\"$pkg\\"); Pkg.build(\\"$pkg\\")"
+
+        test_script:
+          - C:\\projects\\julia\\bin\\julia --check-bounds=yes -e "Pkg.test(\\"$pkg\\")"
+        """)
+    end
+end
+
+function gitignore(pkg::AbstractString; force::Bool=false)
+    genfile(pkg,".gitignore",force) do io
+        print(io, """
+        *.jl.cov
+        *.jl.*.cov
+        *.jl.mem
+        """)
+    end
+end
+
+function entrypoint(pkg::AbstractString; force::Bool=false)
     genfile(pkg,"src/$pkg.jl",force) do io
         print(io, """
         module $pkg
@@ -163,21 +284,9 @@ function entrypoint(pkg::String; force::Bool=false)
     end
 end
 
-function genfile(f::Function, pkg::String, file::String, force::Bool=false)
-    path = joinpath(pkg,file)
-    if force || !ispath(path)
-        info("Generating $file")
-        mkpath(dirname(path))
-        open(f, path, "w")
-        Git.run(`add $file`, dir=pkg)
-        return true
-    end
-    return false
-end
+copyright(years::AbstractString, authors::AbstractString) = "> Copyright (c) $years: $authors."
 
-copyright(years::String, authors::String) = "> Copyright (c) $years: $authors."
-
-function copyright(years::String, authors::Array)
+function copyright(years::AbstractString, authors::Array)
     text = "> Copyright (c) $years:"
     for author in authors
         text *= "\n>  * $author"
@@ -185,7 +294,7 @@ function copyright(years::String, authors::Array)
     return text
 end
 
-mit(pkg::String, years::String, authors::Union(String,Array)) =
+mit(pkg::AbstractString, years::AbstractString, authors::Union{AbstractString,Array}) =
 """
 The $pkg.jl package is licensed under the MIT "Expat" License:
 
@@ -211,7 +320,7 @@ $(copyright(years,authors))
 > SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 
-bsd(pkg::String, years::String, authors::Union(String,Array)) =
+bsd(pkg::AbstractString, years::AbstractString, authors::Union{AbstractString,Array}) =
 """
 The $pkg.jl package is licensed under the Simplified "2-clause" BSD License:
 
@@ -240,7 +349,7 @@ $(copyright(years,authors))
 > OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 
-asl(pkg::String, years::String, authors::Union(String,Array)) =
+asl(pkg::AbstractString, years::AbstractString, authors::Union{AbstractString,Array}) =
 """
 The $pkg.jl package is licensed under version 2.0 of the Apache License:
 
@@ -422,6 +531,6 @@ $(copyright(years,authors))
 >      of your accepting any such warranty or additional liability.
 """
 
-const LICENSES = [ "MIT" => mit, "BSD" => bsd, "ASL" => asl ]
+const LICENSES = Dict("MIT" => mit, "BSD" => bsd, "ASL" => asl)
 
 end # module

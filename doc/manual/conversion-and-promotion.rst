@@ -1,7 +1,7 @@
 .. _man-conversion-and-promotion:
 
 **************************
- Conversion and Promotion  
+ Conversion and Promotion
 **************************
 
 Julia has a system for promoting arguments of mathematical operators to
@@ -45,7 +45,7 @@ mathematical operators are just functions with special syntax, and the
 arguments of functions are never automatically converted. However, one
 may observe that applying mathematical operations to a wide variety of
 mixed argument types is just an extreme case of polymorphic multiple
-dispatch — something which Julia's dispatch and type systems are
+dispatch — something which Julia's dispatch and type systems are
 particularly well-suited to handle. "Automatic" promotion of
 mathematical operands simply emerges as a special application: Julia
 comes with pre-defined catch-all dispatch rules for mathematical
@@ -78,13 +78,13 @@ action:
     julia> typeof(x)
     Int64
 
-    julia> convert(Uint8, x)
+    julia> convert(UInt8, x)
     0x0c
 
     julia> typeof(ans)
-    Uint8
+    UInt8
 
-    julia> convert(FloatingPoint, x)
+    julia> convert(AbstractFloat, x)
     12.0
 
     julia> typeof(ans)
@@ -96,31 +96,45 @@ requested conversion:
 
 .. doctest::
 
-    julia> convert(FloatingPoint, "foo")
-    ERROR: no method convert(Type{FloatingPoint}, ASCIIString)
-     in convert at base.jl:11
+    julia> convert(AbstractFloat, "foo")
+    ERROR: MethodError: `convert` has no method matching convert(::Type{AbstractFloat}, ::ASCIIString)
+    This may have arisen from a call to the constructor AbstractFloat(...),
+    since type constructors fall back to convert methods.
+    Closest candidates are:
+      call{T}(::Type{T}, ::Any)
+      convert(::Type{AbstractFloat}, !Matched::Bool)
+      convert(::Type{AbstractFloat}, !Matched::Int8)
+      ...
 
 Some languages consider parsing strings as numbers or formatting
 numbers as strings to be conversions (many dynamic languages will even
 perform conversion for you automatically), however Julia does not: even
 though some strings can be parsed as numbers, most strings are not valid
 representations of numbers, and only a very limited subset of them are.
+Therefore in Julia the dedicated :func:`parse` function must be used
+to perform this operation, making it more explicit.
 
 Defining New Conversions
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-To define a new conversion, simply provide a new method for ``convert``.
+To define a new conversion, simply provide a new method for :func:`convert`.
 That's really all there is to it. For example, the method to convert a
-number to a boolean is simply this::
+real number to a boolean is this::
 
-    convert(::Type{Bool}, x::Number) = (x!=0)
+    convert(::Type{Bool}, x::Real) = x==0 ? false : x==1 ? true : throw(InexactError())
 
 The type of the first argument of this method is a :ref:`singleton
 type <man-singleton-types>`, ``Type{Bool}``, the only instance of
 which is ``Bool``. Thus, this method is only invoked when the first
-argument is the type value ``Bool``. When invoked, the method determines
+argument is the type value ``Bool``. Notice the syntax used for the first
+argument: the argument name is omitted prior to the ``::`` symbol, and only
+the type is given.  This is the syntax in Julia for a function argument whose type is
+specified but whose value is never used in the function body.  In this example,
+since the type is a singleton, there would never be any reason to use its value
+within the body.
+When invoked, the method determines
 whether a numeric value is true or false as a boolean, by comparing it
-to zero:
+to one and zero:
 
 .. doctest::
 
@@ -132,13 +146,13 @@ to zero:
 
     julia> convert(Bool, 1im)
     ERROR: InexactError()
-     in convert at complex.jl:27
+     in convert at complex.jl:18
 
     julia> convert(Bool, 0im)
     false
 
 The method signatures for conversion methods are often quite a bit more
-involved than this example, especially for parametric types. The example 
+involved than this example, especially for parametric types. The example
 above is meant to be pedagogical, and is not the actual julia behaviour.
 This is the actual implementation in julia::
 
@@ -146,8 +160,8 @@ This is the actual implementation in julia::
                                                throw(InexactError()))
 
     julia> convert(Bool, 1im)
-    InexactError()
-     in convert at complex.jl:40
+    ERROR: InexactError()
+     in convert at complex.jl:18
 
 
 Case Study: Rational Conversions
@@ -158,10 +172,10 @@ conversions declared in
 `rational.jl <https://github.com/JuliaLang/julia/blob/master/base/rational.jl>`_,
 right after the declaration of the type and its constructors::
 
-    convert{T<:Int}(::Type{Rational{T}}, x::Rational) = Rational(convert(T,x.num),convert(T,x.den))
-    convert{T<:Int}(::Type{Rational{T}}, x::Int) = Rational(convert(T,x), convert(T,1))
+    convert{T<:Integer}(::Type{Rational{T}}, x::Rational) = Rational(convert(T,x.num),convert(T,x.den))
+    convert{T<:Integer}(::Type{Rational{T}}, x::Integer) = Rational(convert(T,x), convert(T,1))
 
-    function convert{T<:Int}(::Type{Rational{T}}, x::FloatingPoint, tol::Real)
+    function convert{T<:Integer}(::Type{Rational{T}}, x::AbstractFloat, tol::Real)
         if isnan(x); return zero(T)//zero(T); end
         if isinf(x); return sign(x)//zero(T); end
         y = x
@@ -176,10 +190,10 @@ right after the declaration of the type and its constructors::
             y = 1/y
         end
     end
-    convert{T<:Int}(rt::Type{Rational{T}}, x::FloatingPoint) = convert(rt,x,eps(x))
+    convert{T<:Integer}(rt::Type{Rational{T}}, x::AbstractFloat) = convert(rt,x,eps(x))
 
-    convert{T<:FloatingPoint}(::Type{T}, x::Rational) = convert(T,x.num)/convert(T,x.den)
-    convert{T<:Int}(::Type{T}, x::Rational) = div(convert(T,x.num),convert(T,x.den))
+    convert{T<:AbstractFloat}(::Type{T}, x::Rational) = convert(T,x.num)/convert(T,x.den)
+    convert{T<:Integer}(::Type{T}, x::Rational) = div(convert(T,x.num),convert(T,x.den))
 
 The initial four convert methods provide conversions to rational types.
 The first method converts one type of rational to another type of
@@ -215,7 +229,7 @@ everything to do with converting between alternate representations. For
 instance, although every ``Int32`` value can also be represented as a
 ``Float64`` value, ``Int32`` is not a subtype of ``Float64``.
 
-Promotion to a common supertype is performed in Julia by the ``promote``
+Promotion to a common "greater" type is performed in Julia by the ``promote``
 function, which takes any number of arguments, and returns a tuple of
 the same number of values, converted to a common type, or throws an
 exception if promotion is not possible. The most common use case for
@@ -239,7 +253,7 @@ promotion is to convert numeric arguments to a common type:
     (1.5 + 0.0im,0.0 + 1.0im)
 
     julia> promote(1 + 2im, 3//4)
-    (1//1 + 2//1im,3//4 + 0//1im)
+    (1//1 + 2//1*im,3//4 + 0//1*im)
 
 Floating-point values are promoted to the largest of the floating-point
 argument types. Integer values are promoted to the larger of either the
@@ -261,6 +275,9 @@ the the catch-all method definitions given in
     -(x::Number, y::Number) = -(promote(x,y)...)
     *(x::Number, y::Number) = *(promote(x,y)...)
     /(x::Number, y::Number) = /(promote(x,y)...)
+
+In certain cases, the result type also depends on the operator; how to
+handle such scenarios is described :ref:`elsewhere <devdocs-promote-op>`.
 
 These method definitions say that in the absence of more specific rules
 for adding, subtracting, multiplying and dividing pairs of numeric
@@ -284,16 +301,18 @@ This allows calls like the following to work:
 
 .. doctest::
 
-    julia> Rational(int8(15),int32(-5))
+    julia> Rational(Int8(15),Int32(-5))
     -3//1
 
     julia> typeof(ans)
-    Rational{Int64} (constructor with 1 method)
+    Rational{Int32}
 
 For most user-defined types, it is better practice to require
 programmers to supply the expected types to constructor functions
 explicitly, but sometimes, especially for numeric problems, it can be
 convenient to do promotion automatically.
+
+.. _man-promotion-rules:
 
 Defining Promotion Rules
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -314,16 +333,13 @@ promoted together, they should be promoted to 64-bit floating-point. The
 promotion type does not need to be one of the argument types, however;
 the following promotion rules both occur in Julia's standard library::
 
-    promote_rule(::Type{Uint8}, ::Type{Int8}) = Int
-    promote_rule(::Type{Char}, ::Type{Uint8}) = Int32
+    promote_rule(::Type{UInt8}, ::Type{Int8}) = Int
+    promote_rule(::Type{BigInt}, ::Type{Int8}) = BigInt
 
-As a general rule, Julia promotes integers to `Int` during computation
-order to avoid overflow. In the latter case, the result type is
-``Int32`` since ``Int32`` is large enough to contain all possible
-Unicode code points, and numeric operations on characters always
-result in plain old integers unless explicitly cast back to characters
-(see :ref:`man-characters`). Also note that one does not need to
-define both ``promote_rule(::Type{A}, ::Type{B})`` and
+In the latter case, the result type is ``BigInt`` since ``BigInt`` is
+the only type large enough to hold integers for arbitrary-precision
+integer arithmetic.  Also note that one does not need to define both
+``promote_rule(::Type{A}, ::Type{B})`` and
 ``promote_rule(::Type{B}, ::Type{A})`` — the symmetry is implied by
 the way ``promote_rule`` is used in the promotion process.
 
@@ -336,7 +352,7 @@ would promote to, one can use ``promote_type``:
 
 .. doctest::
 
-    julia> promote_type(Int8, Uint16)
+    julia> promote_type(Int8, UInt16)
     Int64
 
 Internally, ``promote_type`` is used inside of ``promote`` to determine
@@ -353,10 +369,10 @@ Finally, we finish off our ongoing case study of Julia's rational number
 type, which makes relatively sophisticated use of the promotion
 mechanism with the following promotion rules::
 
-    promote_rule{T<:Int}(::Type{Rational{T}}, ::Type{T}) = Rational{T}
-    promote_rule{T<:Int,S<:Int}(::Type{Rational{T}}, ::Type{S}) = Rational{promote_type(T,S)}
-    promote_rule{T<:Int,S<:Int}(::Type{Rational{T}}, ::Type{Rational{S}}) = Rational{promote_type(T,S)}
-    promote_rule{T<:Int,S<:FloatingPoint}(::Type{Rational{T}}, ::Type{S}) = promote_type(T,S)
+    promote_rule{T<:Integer}(::Type{Rational{T}}, ::Type{T}) = Rational{T}
+    promote_rule{T<:Integer,S<:Integer}(::Type{Rational{T}}, ::Type{S}) = Rational{promote_type(T,S)}
+    promote_rule{T<:Integer,S<:Integer}(::Type{Rational{T}}, ::Type{Rational{S}}) = Rational{promote_type(T,S)}
+    promote_rule{T<:Integer,S<:AbstractFloat}(::Type{Rational{T}}, ::Type{S}) = promote_type(T,S)
 
 The first rule asserts that promotion of a rational number with its own
 numerator/denominator type, simply promotes to itself. The second rule
@@ -372,7 +388,7 @@ as promoting the numerator/denominator type with the float.
 This small handful of promotion rules, together with the `conversion
 methods discussed above <#case-study-rational-conversions>`_, are
 sufficient to make rational numbers interoperate completely naturally
-with all of Julia's other numeric types — integers, floating-point
+with all of Julia's other numeric types — integers, floating-point
 numbers, and complex numbers. By providing appropriate conversion
 methods and promotion rules in the same manner, any user-defined numeric
 type can interoperate just as naturally with Julia's predefined

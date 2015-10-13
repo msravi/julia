@@ -1,7 +1,7 @@
 .. _man-methods:
 
 *********
- Methods  
+ Methods
 *********
 
 Recall from :ref:`man-functions` that a function is an object
@@ -42,7 +42,7 @@ sometimes implied rather than explicitly written as an
 argument. [#]_ Using all of a function's arguments to
 choose which method should be invoked, rather than just the first, is
 known as `multiple dispatch
-<http://en.wikipedia.org/wiki/Multiple_dispatch>`_. Multiple
+<https://en.wikipedia.org/wiki/Multiple_dispatch>`_. Multiple
 dispatch is particularly useful for mathematical code, where it makes
 little sense to artificially deem the operations to "belong" to one
 argument more than any of the others: does the addition operation in
@@ -57,7 +57,7 @@ for structuring and organizing programs.
   implicitly passed to the method via the ``this`` keyword, rather then as an
   explicit method argument. When the current ``this`` object is the receiver of a
   method call, it can be omitted altogether, writing just ``meth(arg1,arg2)``,
-  with this implied as the receiving object.
+  with ``this`` implied as the receiving object.
 
 
 Defining Methods
@@ -81,36 +81,41 @@ operator, introduced in the section on :ref:`man-composite-types`:
     julia> f(x::Float64, y::Float64) = 2x + y;
 
 This function definition applies only to calls where ``x`` and ``y`` are
-both values of type ``Float64``:
+both values of type :obj:`Float64`:
 
 .. doctest::
 
     julia> f(2.0, 3.0)
     7.0
 
-Applying it to any other types of arguments will result in a "no method"
-error:
+Applying it to any other types of arguments will result in a :exc:`MethodError`:
 
 .. doctest::
 
     julia> f(2.0, 3)
-    ERROR: no method f(Float64, Int64)
+    ERROR: MethodError: `f` has no method matching f(::Float64, ::Int64)
+    Closest candidates are:
+      f(::Float64, !Matched::Float64)
 
-    julia> f(float32(2.0), 3.0)
-    ERROR: no method f(Float32, Float64)
+    julia> f(Float32(2.0), 3.0)
+    ERROR: MethodError: `f` has no method matching f(::Float32, ::Float64)
+    Closest candidates are:
+      f(!Matched::Float64, ::Float64)
 
     julia> f(2.0, "3.0")
-    ERROR: no method f(Float64, ASCIIString)
+    ERROR: MethodError: `f` has no method matching f(::Float64, ::ASCIIString)
+    Closest candidates are:
+      f(::Float64, !Matched::Float64)
 
     julia> f("2.0", "3.0")
-    ERROR: no method f(ASCIIString, ASCIIString)
+    ERROR: MethodError: `f` has no method matching f(::ASCIIString, ::ASCIIString)
 
-As you can see, the arguments must be precisely of type ``Float64``.
+As you can see, the arguments must be precisely of type :obj:`Float64`.
 Other numeric types, such as integers or 32-bit floating-point values,
 are not automatically converted to 64-bit floating-point, nor are
-strings parsed as numbers. Because ``Float64`` is a concrete type and
+strings parsed as numbers. Because :obj:`Float64` is a concrete type and
 concrete types cannot be subclassed in Julia, such a definition can only
-be applied to arguments that are exactly of type ``Float64``. It may
+be applied to arguments that are exactly of type :obj:`Float64`. It may
 often be useful, however, to write more general methods where the
 declared parameter types are abstract:
 
@@ -122,7 +127,7 @@ declared parameter types are abstract:
     1.0
 
 This method definition applies to any pair of arguments that are
-instances of ``Number``. They need not be of the same type, so long as
+instances of :obj:`Number`. They need not be of the same type, so long as
 they are each numeric values. The problem of handling disparate numeric
 types is delegated to the arithmetic operations in the expression
 ``2x - y``.
@@ -135,8 +140,8 @@ function object. The most specific method definition matching the number
 and types of the arguments will be executed when the function is
 applied. Thus, the two method definitions above, taken together, define
 the behavior for ``f`` over all pairs of instances of the abstract type
-``Number`` — but with a different behavior specific to pairs of
-``Float64`` values. If one of the arguments is a 64-bit float but the
+:obj:`Number` — but with a different behavior specific to pairs of
+:obj:`Float64` values. If one of the arguments is a 64-bit float but the
 other one is not, then the ``f(Float64,Float64)`` method cannot be
 called and the more general ``f(Number,Number)`` method must be used:
 
@@ -163,15 +168,17 @@ from magic. [Clarke61]_
 
 For non-numeric values, and for fewer or more than two arguments, the
 function ``f`` remains undefined, and applying it will still result in a
-"no method" error:
+:obj:`MethodError`:
 
 .. doctest::
 
     julia> f("foo", 3)
-    ERROR: no method f(ASCIIString, Int64)
+    ERROR: MethodError: `f` has no method matching f(::ASCIIString, ::Int64)
+    Closest candidates are:
+      f(!Matched::Number, ::Number)
 
     julia> f()
-    ERROR: no method f()
+    ERROR: MethodError: `f` has no method matching f()
 
 You can easily see which methods exist for a function by entering the
 function object itself in an interactive session:
@@ -183,24 +190,24 @@ function object itself in an interactive session:
 
 This output tells us that ``f`` is a function object with two
 methods. To find out what the signatures of those methods are, use the
-``methods`` function:
+:func:`methods` function:
 
 .. doctest::
 
     julia> methods(f)
     # 2 methods for generic function "f":
-    f(x::Float64,y::Float64) at none:1
-    f(x::Number,y::Number) at none:1
+    f(x::Float64, y::Float64) at none:1
+    f(x::Number, y::Number) at none:1
 
-which shows that f has two methods, one taking two ``Float64``
-arguments and one taking arguments of type ``Number``. It also
+which shows that ``f`` has two methods, one taking two :obj:`Float64`
+arguments and one taking arguments of type :obj:`Number`. It also
 indicates the file and line number where the methods were defined:
 because these methods were defined at the REPL, we get the apparent
 line number ``none:1``.
 
 In the absence of a type declaration with ``::``, the type of a method
-parameter is ``Any`` by default, meaning that it is unconstrained since
-all values in Julia are instances of the abstract type ``Any``. Thus, we
+parameter is :obj:`Any` by default, meaning that it is unconstrained since
+all values in Julia are instances of the abstract type :obj:`Any`. Thus, we
 can define a catch-all method for ``f`` like so:
 
 .. doctest::
@@ -216,104 +223,149 @@ pairs of arguments to which no other method definition applies.
 
 Although it seems a simple concept, multiple dispatch on the types of
 values is perhaps the single most powerful and central feature of the
-Julia language. Core operations typically have dozens of methods:
-
-.. doctest::
+Julia language. Core operations typically have dozens of methods::
 
     julia> methods(+)
-    # 92 methods for generic function "+":
-    +(x::Bool) at bool.jl:35
-    +(x::Bool,y::Bool) at bool.jl:38
-    +(x::Union(SubArray{Bool,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{Bool,N}),y::Union(SubArray{Bool,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{Bool,N})) at array.jl:992
-    +{S,T}(A::Union(SubArray{S,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{S,N}),B::Union(SubArray{T,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{T,N})) at array.jl:936
-    +{T<:Union(Int32,Int8,Int16)}(x::T<:Union(Int32,Int8,Int16),y::T<:Union(Int32,Int8,Int16)) at int.jl:16
-    +{T<:Union(Uint8,Uint32,Uint16)}(x::T<:Union(Uint8,Uint32,Uint16),y::T<:Union(Uint8,Uint32,Uint16)) at int.jl:20
-    +(x::Int64,y::Int64) at int.jl:41
-    +(x::Uint64,y::Uint64) at int.jl:42
-    +(x::Int128,y::Int128) at int.jl:43
-    +(x::Uint128,y::Uint128) at int.jl:44
-    +(a::Float16,b::Float16) at float.jl:129
-    +(x::Float32,y::Float32) at float.jl:131
-    +(x::Float64,y::Float64) at float.jl:132
-    +(z::Complex{T<:Real},w::Complex{T<:Real}) at complex.jl:133
-    +(x::Real,z::Complex{T<:Real}) at complex.jl:141
-    +(z::Complex{T<:Real},x::Real) at complex.jl:142
-    +(x::Rational{T<:Integer},y::Rational{T<:Integer}) at rational.jl:113
-    +(x::Bool,y::Union(SubArray{Bool,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{Bool,N})) at array.jl:986
-    +(x::Union(SubArray{Bool,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{Bool,N}),y::Bool) at array.jl:989
-    +(x::Char,y::Char) at char.jl:25
-    +(x::Char,y::Integer) at char.jl:30
-    +(x::Integer,y::Char) at char.jl:31
-    +(x::BigInt,y::BigInt) at gmp.jl:160
-    +(a::BigInt,b::BigInt,c::BigInt) at gmp.jl:183
-    +(a::BigInt,b::BigInt,c::BigInt,d::BigInt) at gmp.jl:189
-    +(a::BigInt,b::BigInt,c::BigInt,d::BigInt,e::BigInt) at gmp.jl:196
-    +(x::BigInt,c::Uint64) at gmp.jl:208
-    +(c::Uint64,x::BigInt) at gmp.jl:212
-    +(c::Unsigned,x::BigInt) at gmp.jl:213
-    +(x::BigInt,c::Unsigned) at gmp.jl:214
-    +(x::BigInt,c::Signed) at gmp.jl:215
-    +(c::Signed,x::BigInt) at gmp.jl:216
-    +(x::BigFloat,c::Uint64) at mpfr.jl:141
-    +(c::Uint64,x::BigFloat) at mpfr.jl:145
-    +(c::Unsigned,x::BigFloat) at mpfr.jl:146
-    +(x::BigFloat,c::Unsigned) at mpfr.jl:147
-    +(x::BigFloat,c::Int64) at mpfr.jl:151
-    +(c::Int64,x::BigFloat) at mpfr.jl:155
-    +(x::BigFloat,c::Signed) at mpfr.jl:156
-    +(c::Signed,x::BigFloat) at mpfr.jl:157
-    +(x::BigFloat,c::Float64) at mpfr.jl:161
-    +(c::Float64,x::BigFloat) at mpfr.jl:165
-    +(c::Float32,x::BigFloat) at mpfr.jl:166
-    +(x::BigFloat,c::Float32) at mpfr.jl:167
-    +(x::BigFloat,c::BigInt) at mpfr.jl:171
-    +(c::BigInt,x::BigFloat) at mpfr.jl:175
-    +(x::BigFloat,y::BigFloat) at mpfr.jl:322
-    +(a::BigFloat,b::BigFloat,c::BigFloat) at mpfr.jl:333
-    +(a::BigFloat,b::BigFloat,c::BigFloat,d::BigFloat) at mpfr.jl:339
-    +(a::BigFloat,b::BigFloat,c::BigFloat,d::BigFloat,e::BigFloat) at mpfr.jl:346
-    +(x::MathConst{sym},y::MathConst{sym}) at constants.jl:28
-    +{T<:Number}(x::T<:Number,y::T<:Number) at promotion.jl:179
-    +(x::Number,y::Number) at promotion.jl:149
-    +(x::Real,r::Range{T<:Real}) at range.jl:285
-    +(x::Real,r::Range1{T<:Real}) at range.jl:286
-    +(r::Ranges{T},x::Real) at range.jl:287
-    +(r1::Ranges{T},r2::Ranges{T}) at range.jl:299
-    +() at operators.jl:50
-    +(x::Integer,y::Ptr{T}) at pointer.jl:61
-    +(x::Bool,B::BitArray{N}) at bitarray.jl:1226
-    +(x::Number) at operators.jl:56
-    +(x::Ptr{T},y::Integer) at pointer.jl:59
-    +(A::BitArray{N},B::BitArray{N}) at bitarray.jl:1215
-    +(B::BitArray{N},x::Bool) at bitarray.jl:1219
-    +(B::BitArray{N},x::Number) at bitarray.jl:1222
-    +(A::BitArray{N},B::AbstractArray{T,N}) at bitarray.jl:1467
-    +(A::SparseMatrixCSC{Tv,Ti<:Integer},B::Union(Number,Array{T,N})) at sparse/sparsematrix.jl:503
-    +(A::Union(Number,Array{T,N}),B::SparseMatrixCSC{Tv,Ti<:Integer}) at sparse/sparsematrix.jl:504
-    +(A::SymTridiagonal{T<:Union(Float32,Complex{Float32},Complex{Float64},Float64)},B::SymTridiagonal{T<:Union(Float32,Complex{Float32},Complex{Float64},Float64)}) at linalg/tridiag.jl:50
-    +(A::Tridiagonal{T},B::Tridiagonal{T}) at linalg/tridiag.jl:151
-    +(A::Tridiagonal{T},B::SymTridiagonal{T<:Union(Float32,Complex{Float32},Complex{Float64},Float64)}) at linalg/tridiag.jl:164
-    +(A::SymTridiagonal{T<:Union(Float32,Complex{Float32},Complex{Float64},Float64)},B::Tridiagonal{T}) at linalg/tridiag.jl:165
-    +(A::Bidiagonal{T},B::Bidiagonal{T}) at linalg/bidiag.jl:76
-    +(Da::Diagonal{T},Db::Diagonal{T}) at linalg/diagonal.jl:28
-    +{T<:Number}(x::AbstractArray{T<:Number,N}) at abstractarray.jl:325
-    +{T}(A::Number,B::Union(SubArray{T,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{T,N})) at array.jl:947
-    +{T}(A::Union(SubArray{T,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{T,N}),B::Number) at array.jl:954
-    +{S,T<:Real}(A::Union(SubArray{S,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{S,N}),B::Ranges{T<:Real}) at array.jl:962
-    +{S<:Real,T}(A::Ranges{S<:Real},B::Union(SubArray{T,N,A<:Array{T,N},I<:(Union(Range{Int64},Int64,Range1{Int64})...,)},Array{T,N})) at array.jl:971
-    +(x::Number,B::BitArray{N}) at bitarray.jl:1229
-    +(A::AbstractArray{T,N},B::BitArray{N}) at bitarray.jl:1468
-    +{Tv,Ti}(A::SparseMatrixCSC{Tv,Ti},B::SparseMatrixCSC{Tv,Ti}) at sparse/sparsematrix.jl:409
-    +{TvA,TiA,TvB,TiB}(A::SparseMatrixCSC{TvA,TiA},B::SparseMatrixCSC{TvB,TiB}) at sparse/sparsematrix.jl:401
-    +{T}(a::HierarchicalValue{T},b::HierarchicalValue{T}) at pkg/resolve/versionweight.jl:19
-    +(a::VWPreBuildItem,b::VWPreBuildItem) at pkg/resolve/versionweight.jl:82
-    +(a::VWPreBuild,b::VWPreBuild) at pkg/resolve/versionweight.jl:120
-    +(a::VersionWeight,b::VersionWeight) at pkg/resolve/versionweight.jl:164
-    +(a::FieldValue,b::FieldValue) at pkg/resolve/fieldvalue.jl:41
-    +(a::Vec2,b::Vec2) at graphics.jl:62
-    +(bb1::BoundingBox,bb2::BoundingBox) at graphics.jl:128
-    +(a,b,c) at operators.jl:67
-    +(a,b,c,xs...) at operators.jl:68
+    # 139 methods for generic function "+":
+    +(x::Bool) at bool.jl:33
+    +(x::Bool,y::Bool) at bool.jl:36
+    +(y::AbstractFloat,x::Bool) at bool.jl:46
+    +(x::Int64,y::Int64) at int.jl:14
+    +(x::Int8,y::Int8) at int.jl:14
+    +(x::UInt8,y::UInt8) at int.jl:14
+    +(x::Int16,y::Int16) at int.jl:14
+    +(x::UInt16,y::UInt16) at int.jl:14
+    +(x::Int32,y::Int32) at int.jl:14
+    +(x::UInt32,y::UInt32) at int.jl:14
+    +(x::UInt64,y::UInt64) at int.jl:14
+    +(x::Int128,y::Int128) at int.jl:14
+    +(x::UInt128,y::UInt128) at int.jl:14
+    +(x::Float32,y::Float32) at float.jl:192
+    +(x::Float64,y::Float64) at float.jl:193
+    +(z::Complex{T<:Real},w::Complex{T<:Real}) at complex.jl:96
+    +(x::Real,z::Complex{T<:Real}) at complex.jl:106
+    +(z::Complex{T<:Real},x::Real) at complex.jl:107
+    +(x::Rational{T<:Integer},y::Rational{T<:Integer}) at rational.jl:167
+    +(a::Float16,b::Float16) at float16.jl:136
+    +(x::Base.GMP.BigInt,y::Base.GMP.BigInt) at gmp.jl:243
+    +(a::Base.GMP.BigInt,b::Base.GMP.BigInt,c::Base.GMP.BigInt) at gmp.jl:266
+    +(a::Base.GMP.BigInt,b::Base.GMP.BigInt,c::Base.GMP.BigInt,d::Base.GMP.BigInt) at gmp.jl:272
+    +(a::Base.GMP.BigInt,b::Base.GMP.BigInt,c::Base.GMP.BigInt,d::Base.GMP.BigInt,e::Base.GMP.BigInt) at gmp.jl:279
+    +(x::Base.GMP.BigInt,c::Union{UInt32,UInt16,UInt8,UInt64}) at gmp.jl:291
+    +(c::Union{UInt32,UInt16,UInt8,UInt64},x::Base.GMP.BigInt) at gmp.jl:295
+    +(x::Base.GMP.BigInt,c::Union{Int16,Int32,Int8,Int64}) at gmp.jl:307
+    +(c::Union{Int16,Int32,Int8,Int64},x::Base.GMP.BigInt) at gmp.jl:308
+    +(x::Base.MPFR.BigFloat,y::Base.MPFR.BigFloat) at mpfr.jl:206
+    +(x::Base.MPFR.BigFloat,c::Union{UInt32,UInt16,UInt8,UInt64}) at mpfr.jl:213
+    +(c::Union{UInt32,UInt16,UInt8,UInt64},x::Base.MPFR.BigFloat) at mpfr.jl:217
+    +(x::Base.MPFR.BigFloat,c::Union{Int16,Int32,Int8,Int64}) at mpfr.jl:221
+    +(c::Union{Int16,Int32,Int8,Int64},x::Base.MPFR.BigFloat) at mpfr.jl:225
+    +(x::Base.MPFR.BigFloat,c::Union{Float16,Float64,Float32}) at mpfr.jl:229
+    +(c::Union{Float16,Float64,Float32},x::Base.MPFR.BigFloat) at mpfr.jl:233
+    +(x::Base.MPFR.BigFloat,c::Base.GMP.BigInt) at mpfr.jl:237
+    +(c::Base.GMP.BigInt,x::Base.MPFR.BigFloat) at mpfr.jl:241
+    +(a::Base.MPFR.BigFloat,b::Base.MPFR.BigFloat,c::Base.MPFR.BigFloat) at mpfr.jl:318
+    +(a::Base.MPFR.BigFloat,b::Base.MPFR.BigFloat,c::Base.MPFR.BigFloat,d::Base.MPFR.BigFloat) at mpfr.jl:324
+    +(a::Base.MPFR.BigFloat,b::Base.MPFR.BigFloat,c::Base.MPFR.BigFloat,d::Base.MPFR.BigFloat,e::Base.MPFR.BigFloat) at mpfr.jl:331
+    +(x::Irrational{sym},y::Irrational{sym}) at constants.jl:71
+    +{T<:Number}(x::T<:Number,y::T<:Number) at promotion.jl:205
+    +{T<:AbstractFloat}(x::Bool,y::T<:AbstractFloat) at bool.jl:43
+    +(x::Number,y::Number) at promotion.jl:167
+    +(x::Integer,y::Ptr{T}) at pointer.jl:70
+    +(x::Bool,A::AbstractArray{Bool,N}) at array.jl:829
+    +(x::Integer,y::Char) at char.jl:41
+    +(x::Number) at operators.jl:72
+    +(r1::OrdinalRange{T,S},r2::OrdinalRange{T,S}) at operators.jl:325
+    +{T<:AbstractFloat}(r1::FloatRange{T<:AbstractFloat},r2::FloatRange{T<:AbstractFloat}) at operators.jl:331
+    +(r1::FloatRange{T<:AbstractFloat},r2::FloatRange{T<:AbstractFloat}) at operators.jl:348
+    +(r1::FloatRange{T<:AbstractFloat},r2::OrdinalRange{T,S}) at operators.jl:349
+    +(r1::OrdinalRange{T,S},r2::FloatRange{T<:AbstractFloat}) at operators.jl:350
+    +(x::Ptr{T},y::Integer) at pointer.jl:68
+    +{S,T}(A::Range{S},B::Range{T}) at array.jl:773
+    +{S,T}(A::Range{S},B::AbstractArray{T,N}) at array.jl:791
+    +(A::AbstractArray{Bool,N},x::Bool) at array.jl:828
+    +(A::BitArray{N},B::BitArray{N}) at bitarray.jl:926
+    +(A::Union{DenseArray{Bool,N},SubArray{Bool,N,A<:DenseArray{T,N},I<:Tuple{Vararg{Union{Colon,Range{Int64},Int64}}},LD}},B::Union{DenseArray{Bool,N},SubArray{Bool,N,A<:DenseArray{T,N},I<:Tuple{Vararg{Union{Colon,Range{Int64},Int64}}},LD}}) at array.jl:859
+    +(A::Base.LinAlg.SymTridiagonal{T},B::Base.LinAlg.SymTridiagonal{T}) at linalg/tridiag.jl:59
+    +(A::Base.LinAlg.Tridiagonal{T},B::Base.LinAlg.Tridiagonal{T}) at linalg/tridiag.jl:254
+    +(A::Base.LinAlg.Tridiagonal{T},B::Base.LinAlg.SymTridiagonal{T}) at linalg/special.jl:113
+    +(A::Base.LinAlg.SymTridiagonal{T},B::Base.LinAlg.Tridiagonal{T}) at linalg/special.jl:112
+    +(A::Base.LinAlg.UpperTriangular{T,S<:AbstractArray{T,2}},B::Base.LinAlg.UpperTriangular{T,S<:AbstractArray{T,2}}) at linalg/triangular.jl:164
+    +(A::Base.LinAlg.LowerTriangular{T,S<:AbstractArray{T,2}},B::Base.LinAlg.LowerTriangular{T,S<:AbstractArray{T,2}}) at linalg/triangular.jl:165
+    +(A::Base.LinAlg.UpperTriangular{T,S<:AbstractArray{T,2}},B::Base.LinAlg.UnitUpperTriangular{T,S<:AbstractArray{T,2}}) at linalg/triangular.jl:166
+    +(A::Base.LinAlg.LowerTriangular{T,S<:AbstractArray{T,2}},B::Base.LinAlg.UnitLowerTriangular{T,S<:AbstractArray{T,2}}) at linalg/triangular.jl:167
+    +(A::Base.LinAlg.UnitUpperTriangular{T,S<:AbstractArray{T,2}},B::Base.LinAlg.UpperTriangular{T,S<:AbstractArray{T,2}}) at linalg/triangular.jl:168
+    +(A::Base.LinAlg.UnitLowerTriangular{T,S<:AbstractArray{T,2}},B::Base.LinAlg.LowerTriangular{T,S<:AbstractArray{T,2}}) at linalg/triangular.jl:169
+    +(A::Base.LinAlg.UnitUpperTriangular{T,S<:AbstractArray{T,2}},B::Base.LinAlg.UnitUpperTriangular{T,S<:AbstractArray{T,2}}) at linalg/triangular.jl:170
+    +(A::Base.LinAlg.UnitLowerTriangular{T,S<:AbstractArray{T,2}},B::Base.LinAlg.UnitLowerTriangular{T,S<:AbstractArray{T,2}}) at linalg/triangular.jl:171
+    +(A::Base.LinAlg.AbstractTriangular{T,S<:AbstractArray{T,2}},B::Base.LinAlg.AbstractTriangular{T,S<:AbstractArray{T,2}}) at linalg/triangular.jl:172
+    +(Da::Base.LinAlg.Diagonal{T},Db::Base.LinAlg.Diagonal{T}) at linalg/diagonal.jl:50
+    +(A::Base.LinAlg.Bidiagonal{T},B::Base.LinAlg.Bidiagonal{T}) at linalg/bidiag.jl:111
+    +{T}(B::BitArray{2},J::Base.LinAlg.UniformScaling{T}) at linalg/uniformscaling.jl:28
+    +(A::Base.LinAlg.Diagonal{T},B::Base.LinAlg.Bidiagonal{T}) at linalg/special.jl:103
+    +(A::Base.LinAlg.Bidiagonal{T},B::Base.LinAlg.Diagonal{T}) at linalg/special.jl:104
+    +(A::Base.LinAlg.Diagonal{T},B::Base.LinAlg.Tridiagonal{T}) at linalg/special.jl:103
+    +(A::Base.LinAlg.Tridiagonal{T},B::Base.LinAlg.Diagonal{T}) at linalg/special.jl:104
+    +(A::Base.LinAlg.Diagonal{T},B::Array{T,2}) at linalg/special.jl:103
+    +(A::Array{T,2},B::Base.LinAlg.Diagonal{T}) at linalg/special.jl:104
+    +(A::Base.LinAlg.Bidiagonal{T},B::Base.LinAlg.Tridiagonal{T}) at linalg/special.jl:103
+    +(A::Base.LinAlg.Tridiagonal{T},B::Base.LinAlg.Bidiagonal{T}) at linalg/special.jl:104
+    +(A::Base.LinAlg.Bidiagonal{T},B::Array{T,2}) at linalg/special.jl:103
+    +(A::Array{T,2},B::Base.LinAlg.Bidiagonal{T}) at linalg/special.jl:104
+    +(A::Base.LinAlg.Tridiagonal{T},B::Array{T,2}) at linalg/special.jl:103
+    +(A::Array{T,2},B::Base.LinAlg.Tridiagonal{T}) at linalg/special.jl:104
+    +(A::Base.LinAlg.SymTridiagonal{T},B::Array{T,2}) at linalg/special.jl:112
+    +(A::Array{T,2},B::Base.LinAlg.SymTridiagonal{T}) at linalg/special.jl:113
+    +(A::Base.LinAlg.Diagonal{T},B::Base.LinAlg.SymTridiagonal{T}) at linalg/special.jl:121
+    +(A::Base.LinAlg.SymTridiagonal{T},B::Base.LinAlg.Diagonal{T}) at linalg/special.jl:122
+    +(A::Base.LinAlg.Bidiagonal{T},B::Base.LinAlg.SymTridiagonal{T}) at linalg/special.jl:121
+    +(A::Base.LinAlg.SymTridiagonal{T},B::Base.LinAlg.Bidiagonal{T}) at linalg/special.jl:122
+    +{Tv1,Ti1,Tv2,Ti2}(A_1::Base.SparseMatrix.SparseMatrixCSC{Tv1,Ti1},A_2::Base.SparseMatrix.SparseMatrixCSC{Tv2,Ti2}) at sparse/sparsematrix.jl:873
+    +(A::Base.SparseMatrix.SparseMatrixCSC{Tv,Ti<:Integer},B::Array{T,N}) at sparse/sparsematrix.jl:885
+    +(A::Array{T,N},B::Base.SparseMatrix.SparseMatrixCSC{Tv,Ti<:Integer}) at sparse/sparsematrix.jl:887
+    +{P<:Base.Dates.Period}(Y::Union{SubArray{P<:Base.Dates.Period,N,A<:DenseArray{T,N},I<:Tuple{Vararg{Union{Colon,Range{Int64},Int64}}},LD},DenseArray{P<:Base.Dates.Period,N}},x::P<:Base.Dates.Period) at dates/periods.jl:50
+    +{T<:Base.Dates.TimeType}(r::Range{T<:Base.Dates.TimeType},x::Base.Dates.Period) at dates/ranges.jl:39
+    +{T<:Number}(x::AbstractArray{T<:Number,N}) at abstractarray.jl:442
+    +{S,T}(A::AbstractArray{S,N},B::Range{T}) at array.jl:782
+    +{S,T}(A::AbstractArray{S,N},B::AbstractArray{T,N}) at array.jl:800
+    +(A::AbstractArray{T,N},x::Number) at array.jl:832
+    +(x::Number,A::AbstractArray{T,N}) at array.jl:833
+    +(x::Char,y::Integer) at char.jl:40
+    +{N}(index1::Base.IteratorsMD.CartesianIndex{N},index2::Base.IteratorsMD.CartesianIndex{N}) at multidimensional.jl:121
+    +(J1::Base.LinAlg.UniformScaling{T<:Number},J2::Base.LinAlg.UniformScaling{T<:Number}) at linalg/uniformscaling.jl:27
+    +(J::Base.LinAlg.UniformScaling{T<:Number},B::BitArray{2}) at linalg/uniformscaling.jl:29
+    +(J::Base.LinAlg.UniformScaling{T<:Number},A::AbstractArray{T,2}) at linalg/uniformscaling.jl:30
+    +(J::Base.LinAlg.UniformScaling{T<:Number},x::Number) at linalg/uniformscaling.jl:31
+    +(x::Number,J::Base.LinAlg.UniformScaling{T<:Number}) at linalg/uniformscaling.jl:32
+    +{TA,TJ}(A::AbstractArray{TA,2},J::Base.LinAlg.UniformScaling{TJ}) at linalg/uniformscaling.jl:35
+    +{T}(a::Base.Pkg.Resolve.VersionWeights.HierarchicalValue{T},b::Base.Pkg.Resolve.VersionWeights.HierarchicalValue{T}) at pkg/resolve/versionweight.jl:21
+    +(a::Base.Pkg.Resolve.VersionWeights.VWPreBuildItem,b::Base.Pkg.Resolve.VersionWeights.VWPreBuildItem) at pkg/resolve/versionweight.jl:83
+    +(a::Base.Pkg.Resolve.VersionWeights.VWPreBuild,b::Base.Pkg.Resolve.VersionWeights.VWPreBuild) at pkg/resolve/versionweight.jl:129
+    +(a::Base.Pkg.Resolve.VersionWeights.VersionWeight,b::Base.Pkg.Resolve.VersionWeights.VersionWeight) at pkg/resolve/versionweight.jl:183
+    +(a::Base.Pkg.Resolve.MaxSum.FieldValues.FieldValue,b::Base.Pkg.Resolve.MaxSum.FieldValues.FieldValue) at pkg/resolve/fieldvalue.jl:43
+    +{P<:Base.Dates.Period}(x::P<:Base.Dates.Period,y::P<:Base.Dates.Period) at dates/periods.jl:43
+    +{P<:Base.Dates.Period}(x::P<:Base.Dates.Period,Y::Union{SubArray{P<:Base.Dates.Period,N,A<:DenseArray{T,N},I<:Tuple{Vararg{Union{Colon,Range{Int64},Int64}}},LD},DenseArray{P<:Base.Dates.Period,N}}) at dates/periods.jl:49
+    +(x::Base.Dates.Period,y::Base.Dates.Period) at dates/periods.jl:196
+    +(x::Base.Dates.CompoundPeriod,y::Base.Dates.Period) at dates/periods.jl:197
+    +(y::Base.Dates.Period,x::Base.Dates.CompoundPeriod) at dates/periods.jl:198
+    +(x::Base.Dates.CompoundPeriod,y::Base.Dates.CompoundPeriod) at dates/periods.jl:199
+    +(dt::Base.Dates.DateTime,y::Base.Dates.Year) at dates/arithmetic.jl:13
+    +(dt::Base.Dates.Date,y::Base.Dates.Year) at dates/arithmetic.jl:17
+    +(dt::Base.Dates.DateTime,z::Base.Dates.Month) at dates/arithmetic.jl:37
+    +(dt::Base.Dates.Date,z::Base.Dates.Month) at dates/arithmetic.jl:43
+    +(x::Base.Dates.Date,y::Base.Dates.Week) at dates/arithmetic.jl:60
+    +(x::Base.Dates.Date,y::Base.Dates.Day) at dates/arithmetic.jl:62
+    +(x::Base.Dates.DateTime,y::Base.Dates.Period) at dates/arithmetic.jl:64
+    +(a::Base.Dates.TimeType,b::Base.Dates.Period,c::Base.Dates.Period) at dates/periods.jl:210
+    +(a::Base.Dates.TimeType,b::Base.Dates.Period,c::Base.Dates.Period,d::Base.Dates.Period...) at dates/periods.jl:212
+    +(x::Base.Dates.TimeType,y::Base.Dates.CompoundPeriod) at dates/periods.jl:216
+    +(x::Base.Dates.CompoundPeriod,y::Base.Dates.TimeType) at dates/periods.jl:221
+    +(x::Base.Dates.Instant) at dates/arithmetic.jl:4
+    +(x::Base.Dates.TimeType) at dates/arithmetic.jl:8
+    +(y::Base.Dates.Period,x::Base.Dates.TimeType) at dates/arithmetic.jl:66
+    +{T<:Base.Dates.TimeType}(x::Base.Dates.Period,r::Range{T<:Base.Dates.TimeType}) at dates/ranges.jl:40
+    +(a,b,c) at operators.jl:83
+    +(a,b,c,xs...) at operators.jl:84
 
 Multiple dispatch together with the flexible parametric type system give
 Julia its ability to abstractly express high-level algorithms decoupled
@@ -332,12 +384,12 @@ arguments:
     julia> g(x::Float64, y) = 2x + y;
 
     julia> g(x, y::Float64) = x + 2y;
-    Warning: New definition 
-        g(Any,Float64) at none:1
-    is ambiguous with: 
-        g(Float64,Any) at none:1.
-    To fix, define 
-        g(Float64,Float64)
+    WARNING: New definition
+        g(Any, Float64) at none:1
+    is ambiguous with:
+        g(Float64, Any) at none:1.
+    To fix, define
+        g(Float64, Float64)
     before the new definition.
 
     julia> g(2.0, 3)
@@ -414,7 +466,7 @@ the same type:
     julia> same_type("foo", "bar")
     true
 
-    julia> same_type(int32(1), int64(2))
+    julia> same_type(Int32(1), Int64(2))
     false
 
 This kind of definition of function behavior by dispatch is quite common
@@ -438,7 +490,9 @@ signature:
      4
 
     julia> myappend([1,2,3],2.5)
-    ERROR: no method myappend(Array{Int64,1}, Float64)
+    ERROR: MethodError: `myappend` has no method matching myappend(::Array{Int64,1}, ::Float64)
+    Closest candidates are:
+      myappend{T}(::Array{T,1}, !Matched::T)
 
     julia> myappend([1.0,2.0,3.0],4.0)
     4-element Array{Float64,1}:
@@ -448,10 +502,12 @@ signature:
      4.0
 
     julia> myappend([1.0,2.0,3.0],4)
-    ERROR: no method myappend(Array{Float64,1}, Int64)
+    ERROR: MethodError: `myappend` has no method matching myappend(::Array{Float64,1}, ::Int64)
+    Closest candidates are:
+      myappend{T}(::Array{T,1}, !Matched::T)
 
 As you can see, the type of the appended element must match the element
-type of the vector it is appended to, or a "no method" error is raised.
+type of the vector it is appended to, or else a :exc:`MethodError` is raised.
 In the following example, the method type parameter ``T`` is used as the
 return value:
 
@@ -488,11 +544,13 @@ can also constrain type parameters of methods::
     julia> same_type_numeric("foo", "bar")
     no method same_type_numeric(ASCIIString,ASCIIString)
 
-    julia> same_type_numeric(int32(1), int64(2))
+    julia> same_type_numeric(Int32(1), Int64(2))
     false
 
 The ``same_type_numeric`` function behaves much like the ``same_type``
 function defined above, but is only defined for pairs of numbers.
+
+.. _man-note-on-optional-and-keyword-arguments:
 
 Note on Optional and keyword Arguments
 --------------------------------------
@@ -509,10 +567,60 @@ translates to the following three methods::
     f(a) = f(a,2)
     f() = f(1,2)
 
+This means that calling ``f()`` is equivalent to calling ``f(1,2)``. In
+this case the result is ``5``, because ``f(1,2)`` invokes the first
+method of ``f`` above. However, this need not always be the case. If you
+define a fourth method that is more specialized for integers::
+
+    f(a::Int,b::Int) = a-2b
+
+then the result of both ``f()`` and ``f(1,2)`` is ``-3``. In other words,
+optional arguments are tied to a function, not to any specific method of
+that function. It depends on the types of the optional arguments which
+method is invoked. When optional arguments are defined in terms of a global
+variable, the type of the optional argument may even change at run-time.
+
 Keyword arguments behave quite differently from ordinary positional arguments.
 In particular, they do not participate in method dispatch. Methods are
 dispatched based only on positional arguments, with keyword arguments processed
 after the matching method is identified.
 
-.. [Clarke61] Arthur C. Clarke, *Profiles of the Future* (1961): Clarke's Third Law.
+Call overloading and function-like objects
+------------------------------------------
 
+For any arbitrary Julia object ``x`` other than ``Function`` objects
+(defined via ``function`` syntax), ``x(args...)`` is equivalent to
+``call(x, args...)``, where :func:`call` is a generic function in
+the Julia ``Base`` module.   By adding new methods to ``call``, you
+can add a function-call syntax to arbitrary Julia types.   (Such
+"callable" objects are sometimes called "functors.")
+
+For example, if you want to make ``x(arg)`` equivalent to ``x * arg`` for
+``x::Number``, you can define::
+
+    Base.call(x::Number, arg) = x * arg
+
+at which point you can do::
+
+    x = 7
+    x(10)
+
+to get ``70``.
+
+``call`` overloading is also used extensively for type constructors in
+Julia, discussed :ref:`later in the manual <constructors-call-and-conversion>`.
+
+Empty generic functions
+-----------------------
+
+Occasionally it is useful to introduce a generic function without yet adding
+methods.
+This can be used to separate interface definitions from implementations.
+It might also be done for the purpose of documentation or code readability.
+The syntax for this is an empty ``function`` block without a tuple of
+arguments::
+
+    function emptyfunc
+    end
+
+.. [Clarke61] Arthur C. Clarke, *Profiles of the Future* (1961): Clarke's Third Law.

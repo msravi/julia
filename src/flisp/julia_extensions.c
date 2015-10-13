@@ -2,8 +2,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
-#include "flisp.h"
+
 #include "utf8proc.h"
+#undef DLLEXPORT /* avoid conflicting definition */
+
+#include "flisp.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,13 +32,21 @@ value_t fl_skipws(value_t *args, u_int32_t nargs)
     ios_t *s = fl_toiostream(args[0], "skip-ws");
     int newlines = (args[1]!=FL_F);
     uint32_t wc=0;
-    if (ios_peekutf8(s, &wc) == IOS_EOF)
-        return FL_EOF;
     value_t skipped = FL_F;
-    while (!ios_eof(s) && (is_uws(wc) || is_bom(wc)) && (newlines || wc!=10)) {
-        skipped = FL_T;
-        ios_getutf8(s, &wc);
-        ios_peekutf8(s, &wc);
+    while (1) {
+        if (ios_peekutf8(s, &wc) == IOS_EOF) {
+            ios_getutf8(s, &wc);  // to set EOF flag if this is a true EOF
+            if (!ios_eof(s))
+                lerror(symbol("error"), "incomplete character");
+            return FL_EOF;
+        }
+        if (!ios_eof(s) && (is_uws(wc) || is_bom(wc)) && (newlines || wc!=10)) {
+            skipped = FL_T;
+            ios_getutf8(s, &wc);
+        }
+        else {
+            break;
+        }
     }
     return skipped;
 }
@@ -117,8 +128,8 @@ DLLEXPORT int jl_id_char(uint32_t wc)
         cat == UTF8PROC_CATEGORY_ND || cat == UTF8PROC_CATEGORY_PC ||
         cat == UTF8PROC_CATEGORY_SK || cat == UTF8PROC_CATEGORY_ME ||
         cat == UTF8PROC_CATEGORY_NO ||
-        // primes
-        (wc >= 0x2032 && wc <= 0x2034) ||
+        // primes (single, double, triple, their reverses, and quadruple)
+        (wc >= 0x2032 && wc <= 0x2037) || (wc == 0x2057) ||
         // Other_ID_Continue
         wc == 0x0387 || wc == 0x19da || (wc >= 0x1369 && wc <= 0x1371))
         return 1;
@@ -152,17 +163,17 @@ static char *normalize(char *s)
     const int options = UTF8PROC_NULLTERM|UTF8PROC_STABLE|UTF8PROC_COMPOSE;
     ssize_t result;
     size_t newlen;
-    result = utf8proc_decompose((uint8_t*) s, 0, NULL, 0, options);
+    result = utf8proc_decompose((uint8_t*) s, 0, NULL, 0, (utf8proc_option_t)options);
     if (result < 0) goto error;
     newlen = result * sizeof(int32_t) + 1;
     if (newlen > buflen) {
         buflen = newlen * 2;
         buf = realloc(buf, buflen);
-        if (!buf) lerror(MemoryError, "error allocating UTF8 buffer");
+        if (!buf) lerror(OutOfMemoryError, "error allocating UTF8 buffer");
     }
-    result = utf8proc_decompose((uint8_t*)s,0, (int32_t*)buf,result, options);
+    result = utf8proc_decompose((uint8_t*)s,0, (int32_t*)buf,result, (utf8proc_option_t)options);
     if (result < 0) goto error;
-    result = utf8proc_reencode((int32_t*)buf,result, options);
+    result = utf8proc_reencode((int32_t*)buf,result, (utf8proc_option_t)options);
     if (result < 0) goto error;
     return (char*) buf;
 error:

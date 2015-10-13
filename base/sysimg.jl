@@ -1,12 +1,17 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 import Core.Intrinsics.ccall
-ccall(:jl_new_main_module, Any, ())
 
 baremodule Base
 
-eval(x) = Core.eval(Base,x)
-eval(m,x) = Core.eval(m,x)
+using Core: Intrinsics, arraylen, arrayref, arrayset, arraysize, _expr,
+            kwcall, _apply, typeassert, apply_type, svec
+ccall(:jl_set_istopmod, Void, (Bool,), true)
 
 include = Core.include
+
+eval(x) = Core.eval(Base,x)
+eval(m,x) = Core.eval(m,x)
 
 include("exports.jl")
 
@@ -22,12 +27,11 @@ end
 
 
 ## Load essential files and libraries
-
+include("essentials.jl")
+include("docs/bootstrap.jl")
 include("base.jl")
 include("reflection.jl")
-include("build_h.jl")
-include("version_git.jl")
-include("c.jl")
+include("options.jl")
 
 # core operations & types
 include("promotion.jl")
@@ -42,45 +46,52 @@ include("number.jl")
 include("int.jl")
 include("operators.jl")
 include("pointer.jl")
+include("refpointer.jl")
+include("functors.jl")
 
+# array structures
+include("abstractarray.jl")
+include("subarray.jl")
+include("array.jl")
+
+# numeric operations
+include("hashing.jl")
+include("rounding.jl")
+importall .Rounding
 include("float.jl")
 include("complex.jl")
 include("rational.jl")
+include("abstractarraymath.jl")
+include("arraymath.jl")
 
-# core data structures (used by type inference)
-include("abstractarray.jl")
+# SIMD loops
+include("simdloop.jl")
+importall .SimdLoop
+
+# map-reduce operators
 include("reduce.jl")
 
-include("subarray.jl")
-include("array.jl")
+## core structures
 include("bitarray.jl")
 include("intset.jl")
 include("dict.jl")
 include("set.jl")
-include("hashing.jl")
 include("iterator.jl")
 
-# compiler
-import Core.Undef  # used internally by compiler
-include("inference.jl")
-
-# For OS specific stuff in I/O
+# For OS specific stuff
+include(UTF8String(vcat(length(Core.ARGS)>=2?Core.ARGS[2].data:"".data, "build_h.jl".data))) # include($BUILDROOT/base/build_h.jl)
+include(UTF8String(vcat(length(Core.ARGS)>=2?Core.ARGS[2].data:"".data, "version_git.jl".data))) # include($BUILDROOT/base/version_git.jl)
+include("c.jl")
 include("osutils.jl")
-
-const DL_LOAD_PATH = ByteString[]
-@osx_only push!(DL_LOAD_PATH, "@executable_path/../lib/julia")
-@osx_only push!(DL_LOAD_PATH, "@executable_path/../lib")
 
 # strings & printing
 include("char.jl")
 include("ascii.jl")
-include("utf8.jl")
-include("utf16.jl")
-include("utf32.jl")
 include("iobuffer.jl")
 include("string.jl")
-include("utf8proc.jl")
-importall .UTF8proc
+include("unicode.jl")
+include("parse.jl")
+include("shell.jl")
 include("regex.jl")
 include("base64.jl")
 importall .Base64
@@ -91,15 +102,19 @@ include("iostream.jl")
 
 # system & environment
 include("libc.jl")
+using .Libc: getpid, gethostname, time
+include("libdl.jl")
+using .Libdl: DL_LOAD_PATH
 include("env.jl")
-include("errno.jl")
-using .Errno
 include("path.jl")
 include("intfuncs.jl")
 
+# nullable types
+include("nullable.jl")
 
 # I/O
 include("task.jl")
+include("lock.jl")
 include("show.jl")
 include("stream.jl")
 include("socket.jl")
@@ -109,7 +124,6 @@ importall .FS
 include("process.jl")
 include("multimedia.jl")
 importall .Multimedia
-ccall(:jl_get_uv_hooks, Void, ()) # TODO: should put this in _init
 include("grisu.jl")
 import .Grisu.print_shortest
 include("file.jl")
@@ -130,19 +144,8 @@ include("multidimensional.jl")
 
 include("primes.jl")
 
-# concurrency and parallelism
-include("serialize.jl")
-include("multi.jl")
-
-# Polling (requires multi.jl)
-include("poll.jl")
-
-# code loading
-include("loading.jl")
-
-begin
-    SOURCE_PATH = ""
-    include = function(path)
+let SOURCE_PATH = ""
+    global include = function(path)
         prev = SOURCE_PATH
         path = joinpath(dirname(prev),path)
         SOURCE_PATH = path
@@ -162,11 +165,9 @@ include("collections.jl")
 # Combinatorics
 include("sort.jl")
 importall .Sort
-include("combinatorics.jl")
 
-# rounding utilities
-include("rounding.jl")
-importall .Rounding
+# version
+include("version.jl")
 
 # BigInts and BigFloats
 include("gmp.jl")
@@ -174,10 +175,10 @@ importall .GMP
 include("mpfr.jl")
 importall .MPFR
 big(n::Integer) = convert(BigInt,n)
-big(x::FloatingPoint) = convert(BigFloat,x)
+big(x::AbstractFloat) = convert(BigFloat,x)
 big(q::Rational) = big(num(q))//big(den(q))
-big(z::Complex) = complex(big(real(z)),big(imag(z)))
-@vectorize_1arg Number big
+
+include("combinatorics.jl")
 
 # more hashing definitions
 include("hashing2.jl")
@@ -187,29 +188,44 @@ include("dSFMT.jl")
 include("random.jl")
 importall .Random
 
-# distributed arrays and memory-mapped arrays
-include("darray.jl")
+# (s)printf macros
+include("printf.jl")
+importall .Printf
+
+# metaprogramming
+include("meta.jl")
+
+# enums
+include("Enums.jl")
+importall .Enums
+
+# concurrency and parallelism
+include("serialize.jl")
+importall .Serializer
+include("channels.jl")
+include("multi.jl")
+include("managers.jl")
+
+# code loading
+include("loading.jl")
+
+# Polling (requires multi.jl)
+include("poll.jl")
+
+# memory-mapped and shared arrays
 include("mmap.jl")
+import .Mmap
 include("sharedarray.jl")
 
-# utilities - version, timing, help, edit, metaprogramming
-include("version.jl")
+# utilities - timing, help, edit
 include("datafmt.jl")
 importall .DataFmt
 include("deepcopy.jl")
 include("interactiveutil.jl")
 include("replutil.jl")
 include("test.jl")
-include("meta.jl")
 include("i18n.jl")
-include("help.jl")
 using .I18n
-using .Help
-push!(I18n.CALLBACKS, Help.clear_cache)
-
-# SIMD loops
-include("simdloop.jl")
-importall .SimdLoop
 
 # frontend
 include("Terminals.jl")
@@ -218,16 +234,10 @@ include("REPLCompletions.jl")
 include("REPL.jl")
 include("client.jl")
 
-# (s)printf macros
-include("printf.jl")
-importall .Printf
-
 # misc useful functions & macros
 include("util.jl")
 
-# sparse matrices and linear algebra
-include("sparse.jl")
-importall .SparseMatrix
+# dense linear algebra
 include("linalg.jl")
 importall .LinAlg
 const ⋅ = dot
@@ -238,8 +248,16 @@ importall .Broadcast
 # statistics
 include("statistics.jl")
 
+# sparse matrices and sparse linear algebra
+include("sparse.jl")
+importall .SparseMatrix
+
+# irrational mathematical constants
+include("irrationals.jl")
+
 # signal processing
-include("fftw.jl")
+include("dft.jl")
+importall .DFT
 include("dsp.jl")
 importall .DSP
 
@@ -247,37 +265,54 @@ importall .DSP
 include("sysinfo.jl")
 import .Sys.CPU_CORES
 
-# mathematical constants
-include("constants.jl")
-
 # Numerical integration
 include("quadgk.jl")
 importall .QuadGK
 
-# deprecated functions
-include("deprecated.jl")
+# Fast math
+include("fastmath.jl")
+importall .FastMath
+
+# libgit2 support
+include("libgit2.jl")
 
 # package manager
 include("pkg.jl")
 const Git = Pkg.Git
 
-# base graphics API
-include("graphics.jl")
-
 # profiler
 include("profile.jl")
 importall .Profile
+
+# dates
+include("Dates.jl")
+import .Dates: Date, DateTime, now
+
+# Documentation
+
+include("markdown/Markdown.jl")
+include("docs/Docs.jl")
+using .Docs
+using .Markdown
+
+# deprecated functions
+include("deprecated.jl")
+
+# Some basic documentation
+include("docs/helpdb.jl")
+include("docs/basedocs.jl")
 
 function __init__()
     # Base library init
     reinit_stdio()
     Multimedia.reinit_displays() # since Multimedia.displays uses STDOUT as fallback
-    fdwatcher_init()
+    early_init()
+    init_load_path()
+    init_parallel()
 end
 
-include("precompile.jl")
-
 include = include_from_node1
+include("precompile.jl")
 
 end # baremodule Base
 

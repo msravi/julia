@@ -1,3 +1,5 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 module REPL
 
 using Base.Meta
@@ -11,10 +13,11 @@ export
     StreamREPL
 
 import Base:
-    AsyncStream,
     Display,
     display,
-    writemime
+    writemime,
+    AnyDict,
+    ==
 
 import ..LineEdit:
     CompletionProvider,
@@ -26,16 +29,21 @@ import ..LineEdit:
     history_prev,
     history_prev_prefix,
     history_search,
-    accept_result
+    accept_result,
+    terminal
 
 abstract AbstractREPL
 
 answer_color(::AbstractREPL) = ""
 
 type REPLBackend
-    repl_channel::RemoteRef
-    response_channel::RemoteRef
+    repl_channel::Channel
+    response_channel::Channel
+    in_eval::Bool
     ans
+    backend_task::Task
+    REPLBackend(repl_channel, response_channel, in_eval, ans) =
+        new(repl_channel, response_channel, in_eval, ans)
 end
 
 function eval_user_input(ast::ANY, backend::REPLBackend)
@@ -46,12 +54,13 @@ function eval_user_input(ast::ANY, backend::REPLBackend)
                 put!(backend.response_channel, (lasterr, bt))
                 iserr, lasterr = false, ()
             else
-                ast = expand(ast)
                 ans = backend.ans
                 # note: value wrapped in a non-syntax value to avoid evaluating
                 # possibly-invalid syntax (issue #6763).
-                eval(Main, :(ans = $({ans})[1]))
+                eval(Main, :(ans = $(getindex)($(Any[ans]), 1)))
+                backend.in_eval = true
                 value = eval(Main, ast)
+                backend.in_eval = false
                 backend.ans = value
                 put!(backend.response_channel, (value, nothing))
             end
@@ -67,22 +76,9 @@ function eval_user_input(ast::ANY, backend::REPLBackend)
     end
 end
 
-function parse_input_line(s::String)
-    # s = bytestring(s)
-    # (expr, pos) = parse(s, 1)
-    # (ex, pos) = ccall(:jl_parse_string, Any,
-    #                   (Ptr{Uint8},Int32,Int32),
-    #                   s, int32(pos)-1, 1)
-    # if !is(ex,())
-    #     throw(ParseError("extra input after end of expression"))
-    # end
-    # expr
-    ccall(:jl_parse_input_line, Any, (Ptr{Uint8},), s)
-end
-
-function start_repl_backend(repl_channel::RemoteRef, response_channel::RemoteRef)
-    backend = REPLBackend(repl_channel, response_channel, nothing)
-    @async begin
+function start_repl_backend(repl_channel::Channel, response_channel::Channel)
+    backend = REPLBackend(repl_channel, response_channel, false, nothing)
+    backend.backend_task = @schedule begin
         # include looks at this to determine the relative include path
         # nothing means cwd
         while true
@@ -159,15 +155,17 @@ end
 
 # A reference to a backend
 immutable REPLBackendRef
-    repl_channel::RemoteRef
-    response_channel::RemoteRef
+    repl_channel::Channel
+    response_channel::Channel
 end
 
-function run_repl(repl::AbstractREPL)
-    repl_channel = RemoteRef()
-    response_channel = RemoteRef()
-    start_repl_backend(repl_channel, response_channel)
+function run_repl(repl::AbstractREPL, consumer = x->nothing)
+    repl_channel = Channel(1)
+    response_channel = Channel(1)
+    backend = start_repl_backend(repl_channel, response_channel)
+    consumer(backend)
     run_frontend(repl, REPLBackendRef(repl_channel,response_channel))
+    backend
 end
 
 ## BasicREPL ##
@@ -191,6 +189,7 @@ function run_frontend(repl::BasicREPL, backend::REPLBackendRef)
         write(repl.terminal, "julia> ")
         line = ""
         ast = nothing
+        interrupted = false
         while true
             try
                 line *= readline(repl.terminal)
@@ -200,7 +199,7 @@ function run_frontend(repl::BasicREPL, backend::REPLBackendRef)
                         ccall(:jl_raise_debugger, Int, ())
                     end
                     line = ""
-                    write(repl.terminal, "^C\n")
+                    interrupted = true
                     break
                 elseif isa(e,EOFError)
                     hit_eof = true
@@ -220,7 +219,7 @@ function run_frontend(repl::BasicREPL, backend::REPLBackendRef)
             end
         end
         write(repl.terminal, '\n')
-        (isempty(line) || hit_eof) && break
+        ((!interrupted && isempty(line)) || hit_eof) && break
     end
     # terminate backend
     put!(repl_channel, (nothing, -1))
@@ -232,12 +231,12 @@ end
 type LineEditREPL <: AbstractREPL
     t::TextTerminal
     hascolor::Bool
-    prompt_color::String
-    input_color::String
-    answer_color::String
-    shell_color::String
-    help_color::String
-    no_history_file::Bool
+    prompt_color::AbstractString
+    input_color::AbstractString
+    answer_color::AbstractString
+    shell_color::AbstractString
+    help_color::AbstractString
+    history_file::Bool
     in_shell::Bool
     in_help::Bool
     envcolors::Bool
@@ -245,13 +244,14 @@ type LineEditREPL <: AbstractREPL
     specialdisplay
     interface
     backendref::REPLBackendRef
-    LineEditREPL(t,hascolor,prompt_color,input_color,answer_color,shell_color,help_color,no_history_file,in_shell,in_help,envcolors) =
-        new(t,true,prompt_color,input_color,answer_color,shell_color,help_color,no_history_file,in_shell,
+    LineEditREPL(t,hascolor,prompt_color,input_color,answer_color,shell_color,help_color,history_file,in_shell,in_help,envcolors) =
+        new(t,true,prompt_color,input_color,answer_color,shell_color,help_color,history_file,in_shell,
             in_help,envcolors,false,nothing)
 end
 outstream(r::LineEditREPL) = r.t
 specialdisplay(r::LineEditREPL) = r.specialdisplay
 specialdisplay(r::AbstractREPL) = nothing
+terminal(r::LineEditREPL) = r.t
 
 LineEditREPL(t::TextTerminal, envcolors = false) =  LineEditREPL(t,
                                               true,
@@ -272,30 +272,33 @@ end
 
 immutable LatexCompletions <: CompletionProvider; end
 
-bytestring_beforecursor(buf::IOBuffer) = bytestring(pointer(buf.data), buf.ptr-1)
+bytestring_beforecursor(buf::IOBuffer) = bytestring(buf.data[1:buf.ptr-1])
 
 function complete_line(c::REPLCompletionProvider, s)
     partial = bytestring_beforecursor(s.input_buffer)
-    ret, range, should_complete = completions(partial, endof(partial))
+    full = LineEdit.input_string(s)
+    ret, range, should_complete = completions(full, endof(partial))
     return ret, partial[range], should_complete
 end
 
 function complete_line(c::ShellCompletionProvider, s)
     # First parse everything up to the current position
     partial = bytestring_beforecursor(s.input_buffer)
-    ret, range, should_complete = shell_completions(partial, endof(partial))
+    full = LineEdit.input_string(s)
+    ret, range, should_complete = shell_completions(full, endof(partial))
     return ret, partial[range], should_complete
 end
 
 function complete_line(c::LatexCompletions, s)
     partial = bytestring_beforecursor(LineEdit.buffer(s))
-    ret, range, should_complete = latex_completions(partial, endof(partial))[2]
+    full = LineEdit.input_string(s)
+    ret, range, should_complete = bslash_completions(full, endof(partial))[2]
     return ret, partial[range], should_complete
 end
 
 
 type REPLHistoryProvider <: HistoryProvider
-    history::Array{String,1}
+    history::Array{AbstractString,1}
     history_file
     cur_idx::Int
     last_idx::Int
@@ -305,12 +308,18 @@ type REPLHistoryProvider <: HistoryProvider
     modes::Array{Symbol,1}
 end
 REPLHistoryProvider(mode_mapping) =
-    REPLHistoryProvider(String[], nothing, 0, -1, IOBuffer(),
-                        nothing, mode_mapping, Uint8[])
+    REPLHistoryProvider(AbstractString[], nothing, 0, -1, IOBuffer(),
+                        nothing, mode_mapping, UInt8[])
 
 const invalid_history_message = """
-Invalid history format. If you have a ~/.julia_history file left over from an older version of Julia, try renaming or deleting it.
-"""
+Invalid history file (~/.julia_history) format:
+If you have a history file left over from an older version of Julia,
+try renaming or deleting it.
+Invalid character: """
+
+const munged_history_message = """
+Invalid history file (~/.julia_history) format:
+An editor may have converted tabs to spaces at line """
 
 function hist_getline(file)
     while !eof(file)
@@ -324,27 +333,38 @@ end
 function hist_from_file(hp, file)
     hp.history_file = file
     seek(file, 0)
+    countlines = 0
     while true
         mode = :julia
         line = hist_getline(file)
         isempty(line) && break
-        line[1] == '#' || error(invalid_history_message)
+        countlines += 1
+        line[1] != '#' &&
+            error(invalid_history_message, repr(line[1]), " at line ", countlines)
         while !isempty(line)
             m = match(r"^#\s*(\w+)\s*:\s*(.*?)\s*$", line)
-            m == nothing && break
+            m === nothing && break
             if m.captures[1] == "mode"
                 mode = symbol(m.captures[2])
             end
             line = hist_getline(file)
+            countlines += 1
         end
         isempty(line) && break
-        line[1] == '\t' || error(invalid_history_message)
+        # Make sure starts with tab
+        line[1] == ' '  &&
+            error(munged_history_message, countlines)
+        line[1] != '\t' &&
+            error(invalid_history_message, repr(line[1]), " at line ", countlines)
         lines = UTF8String[]
         while !isempty(line)
             push!(lines, chomp(line[2:end]))
             eof(file) && break
-            Base.peek(file) == '\t' || break
+            ch = Base.peek(file)
+            ch == ' '  && error(munged_history_message, countlines)
+            ch != '\t' && break
             line = hist_getline(file)
+            countlines += 1
         end
         push!(hp.modes, mode)
         push!(hp.history, join(lines, '\n'))
@@ -369,9 +389,9 @@ function add_history(hist::REPLHistoryProvider, s)
         mode == hist.modes[end] && str == hist.history[end] && return
     push!(hist.modes, mode)
     push!(hist.history, str)
-    hist.history_file == nothing && return
+    hist.history_file === nothing && return
     entry = """
-    # time: $(strftime("%Y-%m-%d %H:%M:%S %Z", time()))
+    # time: $(Libc.strftime("%Y-%m-%d %H:%M:%S %Z", time()))
     # mode: $mode
     $(replace(str, r"^"ms, "\t"))
     """
@@ -381,7 +401,7 @@ function add_history(hist::REPLHistoryProvider, s)
     flush(hist.history_file)
 end
 
-function history_move(s::LineEdit.MIState, hist::REPLHistoryProvider, idx::Int, save_idx::Int = hist.cur_idx)
+function history_move(s::Union{LineEdit.MIState,LineEdit.PrefixSearchState}, hist::REPLHistoryProvider, idx::Int, save_idx::Int = hist.cur_idx)
     max_idx = length(hist.history) + 1
     @assert 1 <= hist.cur_idx <= max_idx
     (1 <= idx <= max_idx) || return :none
@@ -398,14 +418,16 @@ function history_move(s::LineEdit.MIState, hist::REPLHistoryProvider, idx::Int, 
 
     # load the saved line
     if idx == max_idx
-        LineEdit.transition(s, hist.last_mode)
-        LineEdit.replace_line(s, hist.last_buffer)
-        hist.last_mode = nothing
-        hist.last_buffer = IOBuffer()
+        LineEdit.transition(s, hist.last_mode) do
+            LineEdit.replace_line(s, hist.last_buffer)
+            hist.last_mode = nothing
+            hist.last_buffer = IOBuffer()
+        end
     else
         if haskey(hist.mode_mapping, hist.modes[idx])
-            LineEdit.transition(s, hist.mode_mapping[hist.modes[idx]])
-            LineEdit.replace_line(s, hist.history[idx])
+            LineEdit.transition(s, hist.mode_mapping[hist.modes[idx]]) do
+                LineEdit.replace_line(s, hist.history[idx])
+            end
         else
             return :skip
         end
@@ -421,8 +443,9 @@ function LineEdit.accept_result(s, p::LineEdit.HistoryPrompt{REPLHistoryProvider
     hist = p.hp
     if 1 <= hist.cur_idx <= length(hist.modes)
         m = hist.mode_mapping[hist.modes[hist.cur_idx]]
-        LineEdit.replace_line(LineEdit.state(s, m), LineEdit.state(s, p).response_buffer)
-        LineEdit.transition(s, m)
+        LineEdit.transition(s, m) do
+            LineEdit.replace_line(LineEdit.state(s, m), LineEdit.state(s, p).response_buffer)
+        end
     else
         LineEdit.transition(s, parent)
     end
@@ -449,7 +472,8 @@ end
 function history_next(s::LineEdit.MIState, hist::REPLHistoryProvider,
         save_idx::Int = hist.cur_idx)
     cur_idx = hist.cur_idx
-    if 0 < hist.last_idx
+    max_idx = length(hist.history) + 1
+    if cur_idx == max_idx && 0 < hist.last_idx
         # issue #6312
         cur_idx = hist.last_idx
         hist.last_idx = -1
@@ -466,29 +490,43 @@ function history_next(s::LineEdit.MIState, hist::REPLHistoryProvider,
     end
 end
 
-function history_move_prefix(s::LineEdit.MIState,
+function history_move_prefix(s::LineEdit.PrefixSearchState,
                              hist::REPLHistoryProvider,
-                             backwards::Bool)
-    buf = LineEdit.buffer(s)
-    pos = position(buf)
-    prefix = bytestring_beforecursor(buf)
-    allbuf = bytestring(buf)
-    idxs = backwards ? ((hist.cur_idx-1):-1:1) : ((hist.cur_idx+1):length(hist.history))
+                             prefix::AbstractString,
+                             backwards::Bool,
+                             cur_idx = hist.cur_idx)
+    cur_response = bytestring(LineEdit.buffer(s))
+    # when searching forward, start at last_idx
+    if !backwards && hist.last_idx > 0
+        cur_idx = hist.last_idx
+    end
+    hist.last_idx = -1
+    max_idx = length(hist.history)+1
+    idxs = backwards ? ((cur_idx-1):-1:1) : ((cur_idx+1):max_idx)
     for idx in idxs
-        if beginswith(hist.history[idx], prefix) && hist.history[idx] != allbuf
-            history_move(s, hist, idx)
-            seek(LineEdit.buffer(s), pos)
-            LineEdit.refresh_line(s)
-            return
+        if (idx == max_idx) || (startswith(hist.history[idx], prefix) && (hist.history[idx] != cur_response || hist.modes[idx] != LineEdit.mode(s)))
+            m = history_move(s, hist, idx)
+            if m == :ok
+                if length(prefix) == 0
+                    # on empty prefix search, move cursor to the end
+                    LineEdit.move_input_end(s)
+                else
+                    # otherwise, keep cursor at the prefix position as a visual cue
+                    seek(LineEdit.buffer(s), length(prefix))
+                end
+                LineEdit.refresh_line(s)
+                return :ok
+            elseif m == :skip
+                return history_move_prefix(s,hist,prefix,backwards,idx)
+            end
         end
     end
     Terminals.beep(LineEdit.terminal(s))
 end
-history_next_prefix(s::LineEdit.MIState, hist::REPLHistoryProvider) =
-    hist.cur_idx == length(hist.history) ?
-        history_next(s, hist) : history_move_prefix(s, hist, false)
-history_prev_prefix(s::LineEdit.MIState, hist::REPLHistoryProvider) =
-    history_move_prefix(s, hist, true)
+history_next_prefix(s::LineEdit.PrefixSearchState, hist::REPLHistoryProvider, prefix::AbstractString) =
+    history_move_prefix(s, hist, prefix, false)
+history_prev_prefix(s::LineEdit.PrefixSearchState, hist::REPLHistoryProvider, prefix::AbstractString) =
+    history_move_prefix(s, hist, prefix, true)
 
 function history_search(hist::REPLHistoryProvider, query_buffer::IOBuffer, response_buffer::IOBuffer,
                         backwards::Bool=false, skip_current::Bool=false)
@@ -544,7 +582,9 @@ LineEdit.reset_state(hist::REPLHistoryProvider) = history_reset_state(hist)
 const julia_green = "\033[1m\033[32m"
 
 function return_callback(s)
-    ast = parse_input_line(bytestring(LineEdit.buffer(s)))
+    ast = Base.syntax_deprecation_warnings(false) do
+        Base.parse_input_line(bytestring(LineEdit.buffer(s)))
+    end
     if  !isa(ast, Expr) || (ast.head != :continue && ast.head != :incomplete)
         return true
     else
@@ -571,20 +611,20 @@ function send_to_backend(ast, req, rep)
     val, bt = take!(rep)
 end
 
-function respond(f, repl, main)
+function respond(f, repl, main; pass_empty = false)
     (s,buf,ok)->begin
         if !ok
             return transition(s, :abort)
         end
         line = takebuf_string(buf)
-        if !isempty(line)
+        if !isempty(line) || pass_empty
             reset(repl)
             val, bt = send_to_backend(f(line), backend(repl))
             if !ends_with_semicolon(line) || bt !== nothing
                 print_response(repl, val, bt, true, Base.have_color)
             end
         end
-        println(repl.t)
+        prepare_next(repl)
         reset_state(s)
         s.current_mode.sticky || transition(s, main)
     end
@@ -593,6 +633,32 @@ end
 function reset(repl::LineEditREPL)
     raw!(repl.t, false)
     print(repl.t,Base.text_colors[:normal])
+end
+
+function prepare_next(repl::LineEditREPL)
+    println(terminal(repl))
+end
+
+function mode_keymap(julia_prompt)
+    AnyDict(
+    '\b' => function (s,o...)
+        if isempty(s) || position(LineEdit.buffer(s)) == 0
+            buf = copy(LineEdit.buffer(s))
+            transition(s, julia_prompt) do
+                LineEdit.state(s, julia_prompt).input_buffer = buf
+            end
+        else
+            LineEdit.edit_backspace(s)
+        end
+    end,
+    "^C" => function (s,o...)
+        LineEdit.move_input_end(s)
+        LineEdit.refresh_line(s)
+        print(LineEdit.terminal(s), "^C\n\n")
+        transition(s, julia_prompt)
+        transition(s, :reset)
+        LineEdit.refresh_line(s)
+    end)
 end
 
 function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_repl_keymap = Dict{Any,Any}[])
@@ -606,7 +672,7 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
     #
     # Usage:
     #
-    # repl_channel,response_channel = RemoteRef(),RemoteRef()
+    # repl_channel,response_channel = Channel(),Channel()
     # start_repl_backend(repl_channel, response_channel)
     # setup_interface(REPLDisplay(t),repl_channel,response_channel)
     #
@@ -646,7 +712,12 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
         complete = replc,
         # When we're done transform the entered line into a call to help("$line")
         on_done = respond(repl, julia_prompt) do line
-            parse("Base.@help $line", raise=false)
+            line = strip(line)
+            haskey(Docs.keywords, symbol(line)) ? # Special-case keywords, which won't parse
+                :(Base.Docs.@repl $(symbol(line))) :
+                Base.syntax_deprecation_warnings(false) do
+                    parse("Base.Docs.@repl $line", raise=false)
+                end
         end)
 
     # Set up shell mode
@@ -660,17 +731,18 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
         # and pass into Base.repl_cmd for processing (handles `ls` and `cd`
         # special)
         on_done = respond(repl, julia_prompt) do line
-            Expr(:call, :(Base.repl_cmd), macroexpand(Expr(:macrocall, symbol("@cmd"),line)))
+            Expr(:call, :(Base.repl_cmd), macroexpand(Expr(:macrocall, symbol("@cmd"),line)), outstream(repl))
         end)
+
 
     ################################# Stage II #############################
 
     # Setup history
     # We will have a unified history for all REPL modes
-    hp = REPLHistoryProvider((Symbol=>Any)[:julia => julia_prompt,
-                                           :shell => shell_mode,
-                                           :help  => help_mode])
-    if !repl.no_history_file
+    hp = REPLHistoryProvider(Dict{Symbol,Any}(:julia => julia_prompt,
+                                              :shell => shell_mode,
+                                              :help  => help_mode))
+    if repl.history_file
         try
             f = open(find_hist_file(), true, true, true, false, false)
             finalizer(replc, replc->close(f))
@@ -679,7 +751,7 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
             print_response(repl, e, catch_backtrace(), true, Base.have_color)
             println(outstream(repl))
             info("Disabling history file for this session.")
-            repl.no_history_file = true
+            repl.history_file = false
         end
     end
     history_reset_state(hp)
@@ -687,48 +759,41 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
     shell_mode.hist = hp
     help_mode.hist = hp
 
-    hkp, hkeymap = LineEdit.setup_search_keymap(hp)
-
-    hkp.complete = LatexCompletions()
+    search_prompt, skeymap = LineEdit.setup_search_keymap(hp)
+    search_prompt.complete = LatexCompletions()
 
     # Canonicalize user keymap input
     if isa(extra_repl_keymap, Dict)
         extra_repl_keymap = [extra_repl_keymap]
     end
 
-    const repl_keymap = {
-        ';' => function (s)
+    const repl_keymap = AnyDict(
+        ';' => function (s,o...)
             if isempty(s) || position(LineEdit.buffer(s)) == 0
                 buf = copy(LineEdit.buffer(s))
-                transition(s, shell_mode)
-                LineEdit.state(s, shell_mode).input_buffer = buf
-                LineEdit.refresh_line(s)
+                transition(s, shell_mode) do
+                    LineEdit.state(s, shell_mode).input_buffer = buf
+                end
             else
                 edit_insert(s, ';')
             end
         end,
-        '?' => function (s)
+        '?' => function (s,o...)
             if isempty(s) || position(LineEdit.buffer(s)) == 0
                 buf = copy(LineEdit.buffer(s))
-                transition(s, help_mode)
-                LineEdit.state(s, help_mode).input_buffer = buf
-                LineEdit.refresh_line(s)
+                transition(s, help_mode) do
+                    LineEdit.state(s, help_mode).input_buffer = buf
+                end
             else
                 edit_insert(s, '?')
             end
         end,
 
         # Bracketed Paste Mode
-        "\e[200~" => s->begin
-            ps = LineEdit.state(s, LineEdit.mode(s))
-            input = readuntil(ps.terminal, "\e[201~")[1:(end-6)]
-            input = replace(input, '\r', '\n')
-            if position(LineEdit.buffer(s)) == 0
-                indent = Base.indentation(input)[1]
-                input = Base.unindent(lstrip(input), indent)
-            end
+        "\e[200~" => (s,o...)->begin
+            input = LineEdit.bracketed_paste(s)
             buf = copy(LineEdit.buffer(s))
-            edit_insert(buf,input)
+            edit_insert(buf, input)
             string = takebuf_string(buf)
             curspos = position(LineEdit.buffer(s))
             pos = 0
@@ -736,7 +801,9 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
             sz = sizeof(string)
             while pos <= sz
                 oldpos = pos
-                ast, pos = Base.parse(string, pos, raise=false)
+                ast, pos = Base.syntax_deprecation_warnings(false) do
+                    Base.parse(string, pos, raise=false)
+                end
                 if isa(ast, Expr) && ast.head == :error
                     # Insert all the remaining text as one line (might be empty)
                     LineEdit.replace_line(s, strip(bytestring(string.data[max(oldpos, 1):end])))
@@ -757,49 +824,31 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
                     LineEdit.commit_line(s)
                     # This is slightly ugly but ok for now
                     terminal = LineEdit.terminal(s)
-                    stop_reading(terminal)
                     raw!(terminal, false) && disable_bracketed_paste(terminal)
                     LineEdit.mode(s).on_done(s, LineEdit.buffer(s), true)
                     raw!(terminal, true) && enable_bracketed_paste(terminal)
-                    start_reading(terminal)
                 else
                     break
                 end
             end
         end,
-    }
+    )
 
-    a = Dict{Any,Any}[hkeymap, repl_keymap, LineEdit.history_keymap(hp), LineEdit.default_keymap, LineEdit.escape_defaults]
+    prefix_prompt, prefix_keymap = LineEdit.setup_prefix_keymap(hp, julia_prompt)
+
+    a = Dict{Any,Any}[skeymap, repl_keymap, prefix_keymap, LineEdit.history_keymap, LineEdit.default_keymap, LineEdit.escape_defaults]
     prepend!(a, extra_repl_keymap)
 
-    julia_prompt.keymap_func = @eval @LineEdit.keymap $(a)
+    julia_prompt.keymap_dict = LineEdit.keymap(a)
 
-    const mode_keymap = {
-        '\b' => function (s)
-            if isempty(s) || position(LineEdit.buffer(s)) == 0
-                buf = copy(LineEdit.buffer(s))
-                transition(s, julia_prompt)
-                LineEdit.state(s, julia_prompt).input_buffer = buf
-                LineEdit.refresh_line(s)
-            else
-                LineEdit.edit_backspace(s)
-            end
-        end,
-        "^C" => function (s)
-            LineEdit.move_input_end(s)
-            LineEdit.refresh_line(s)
-            print(LineEdit.terminal(s), "^C\n\n")
-            transition(s, julia_prompt)
-            transition(s, :reset)
-            LineEdit.refresh_line(s)
-        end
-    }
+    mk = mode_keymap(julia_prompt)
 
-    b = Dict{Any,Any}[hkeymap, mode_keymap, LineEdit.history_keymap(hp), LineEdit.default_keymap, LineEdit.escape_defaults]
+    b = Dict{Any,Any}[skeymap, mk, prefix_keymap, LineEdit.history_keymap, LineEdit.default_keymap, LineEdit.escape_defaults]
+    prepend!(b, extra_repl_keymap)
 
-    shell_mode.keymap_func = help_mode.keymap_func = @eval @LineEdit.keymap $(b)
+    shell_mode.keymap_dict = help_mode.keymap_dict = LineEdit.keymap(b)
 
-    ModalInterface([julia_prompt, shell_mode, help_mode,hkp])
+    ModalInterface([julia_prompt, shell_mode, help_mode, search_prompt, prefix_prompt])
 end
 
 function run_frontend(repl::LineEditREPL, backend)
@@ -827,16 +876,16 @@ end
 
 type StreamREPL <: AbstractREPL
     stream::IO
-    prompt_color::String
-    input_color::String
-    answer_color::String
+    prompt_color::AbstractString
+    input_color::AbstractString
+    answer_color::AbstractString
     waserror::Bool
     StreamREPL(stream,pc,ic,ac) = new(stream,pc,ic,ac,false)
 end
 
 outstream(s::StreamREPL) = s.stream
 
-StreamREPL(stream::AsyncStream) = StreamREPL(stream, julia_green, Base.text_colors[:white], Base.answer_color())
+StreamREPL(stream::IO) = StreamREPL(stream, julia_green, Base.text_colors[:white], Base.answer_color())
 
 answer_color(r::LineEditREPL) = r.envcolors ? Base.answer_color() : r.answer_color
 answer_color(r::StreamREPL) = r.answer_color
@@ -844,11 +893,11 @@ input_color(r::LineEditREPL) = r.envcolors ? Base.input_color() : r.input_color
 input_color(r::StreamREPL) = r.input_color
 
 
-function run_repl(stream::AsyncStream)
+function run_repl(stream::IO)
     repl =
     @async begin
-        repl_channel = RemoteRef()
-        response_channel = RemoteRef()
+        repl_channel = Channel(1)
+        response_channel = Channel(1)
         start_repl_backend(repl_channel, response_channel)
         StreamREPL_frontend(repl, repl_channel, response_channel)
     end

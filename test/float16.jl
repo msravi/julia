@@ -1,6 +1,9 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
 
-f = float16(2.)
-g = float16(1.)
+using Base.Test
+
+f = Float16(2.)
+g = Float16(1.)
 
 @test f >= g
 @test f > g
@@ -13,19 +16,43 @@ g = float16(1.)
 @test isless(g, f)
 @test !isless(f, g)
 
-@test -f === float16(-2.)
+@test convert(Bool,Float16(0.0)) == false
+@test convert(Bool,Float16(1.0)) == true
+@test_throws InexactError convert(Bool,Float16(0.1))
 
-@test f+g === float16(3f0)
-@test f-g === float16(1f0)
-@test f*g === float16(2f0)
-@test f/g === float16(2f0)
-@test f^g === float16(2f0)
-@test f^-g === float16(0.5f0)
+@test convert(Int128,Float16(-2.0)) == Int128(-2)
+@test convert(UInt128,Float16(2.0)) == UInt128(2)
 
-@test f + 2 === float32(4f0)
-@test f - 2 === float32(0f0)
-@test f*2 === float32(4f0)
-@test f/2 === float32(1f0)
+x = Float32(rand())
+y = Float32(rand())
+z = Float32(rand())
+@test_approx_eq Float16(x)^2 Float16(x^2)
+@test round(Int,Float16(x)) == round(Int,x)
+@test trunc(Int,Float16(x)) == trunc(Int,x)
+@test floor(Int,Float16(x)) == floor(Int,x)
+@test ceil(Int,Float16(x)) == ceil(Int,x)
+@test round(Float16(x)) == round(x)
+@test trunc(Float16(x)) == trunc(x)
+@test floor(Float16(x)) == floor(x)
+@test ceil(Float16(x)) == ceil(x)
+@test_approx_eq fma(Float16(x),Float16(y),Float16(z)) fma(x,y,z)
+@test_approx_eq muladd(Float16(x),Float16(y),Float16(z)) muladd(x,y,z)
+@test convert(Int128,Float16(-1.0)) == Int128(-1)
+@test convert(UInt128,Float16(5.0)) == UInt128(5)
+
+@test -f === Float16(-2.)
+
+@test f+g === Float16(3f0)
+@test f-g === Float16(1f0)
+@test f*g === Float16(2f0)
+@test f/g === Float16(2f0)
+@test f^g === Float16(2f0)
+@test f^-g === Float16(0.5f0)
+
+@test f + 2 === Float32(4f0)
+@test f - 2 === Float32(0f0)
+@test f*2 === Float32(4f0)
+@test f/2 === Float32(1f0)
 @test f + 2. === 4.
 @test f - 2. === 0.
 @test f*2. === 4.
@@ -37,7 +64,7 @@ g = float16(1.)
 @test isnan(-NaN16)
 @test !isnan(Inf16)
 @test !isnan(-Inf16)
-@test !isnan(float16(2.6))
+@test !isnan(Float16(2.6))
 @test NaN16 != NaN16
 @test isequal(NaN16, NaN16)
 @test repr(NaN16) == "NaN16"
@@ -47,7 +74,7 @@ g = float16(1.)
 @test isinf(-Inf16)
 @test !isinf(NaN16)
 @test !isinf(-NaN16)
-@test !isinf(float16(2.6))
+@test !isinf(Float16(2.6))
 @test Inf16 == Inf16
 @test Inf16 != -Inf16
 @test -Inf16 < Inf16
@@ -55,7 +82,9 @@ g = float16(1.)
 @test repr(Inf16) == "Inf16"
 @test sprint(showcompact, Inf16) == "Inf"
 
-for z1 in (float16(0.0), float16(-0.0)), z2 in (float16(0.0), float16(-0.0))
+@test repr(Float16(44099)) == "Float16(4.41e4)"
+
+for z1 in (Float16(0.0), Float16(-0.0)), z2 in (Float16(0.0), Float16(-0.0))
     @test z1 == z2
     @test isequal(z1, z1)
     @test z1 === z1
@@ -65,11 +94,11 @@ for z1 in (float16(0.0), float16(-0.0)), z2 in (float16(0.0), float16(-0.0))
     end
 end
 
-@test float16(2.5) == float16(2.5)
-@test float16(2.5) != float16(2.6)
-@test isequal(float16(0.0), float16(0.0))
-@test !isequal(float16(-0.0), float16(0.0))
-@test !isequal(float16(0.0), float16(-0.0))
+@test Float16(2.5) == Float16(2.5)
+@test Float16(2.5) != Float16(2.6)
+@test isequal(Float16(0.0), Float16(0.0))
+@test !isequal(Float16(-0.0), Float16(0.0))
+@test !isequal(Float16(0.0), Float16(-0.0))
 
 @test isnan(reinterpret(Float16,0x7c01))
 @test !isinf(reinterpret(Float16,0x7c01))
@@ -80,18 +109,23 @@ end
 # rounding in conversions
 let
     for f in [.3325f0, -.3325f0]
-        f16 = float16(f)
+        f16 = Float16(f)
         # need to round away from 0. make sure we picked closest number.
         @test abs(f-f16) < abs(f-nextfloat(f16))
         @test abs(f-f16) < abs(f-prevfloat(f16))
     end
     # halfway between and last bit is 1
     f = reinterpret(Float32,                           0b00111110101010100011000000000000)
-    @test float32(float16(f)) === reinterpret(Float32, 0b00111110101010100100000000000000)
+    @test Float32(Float16(f)) === reinterpret(Float32, 0b00111110101010100100000000000000)
     # halfway between and last bit is 0
     f = reinterpret(Float32,                           0b00111110101010100001000000000000)
-    @test float32(float16(f)) === reinterpret(Float32, 0b00111110101010100000000000000000)
+    @test Float32(Float16(f)) === reinterpret(Float32, 0b00111110101010100000000000000000)
 end
 
 # issue #5948
-@test string(reinterpret(Float16, 0x7bff)) == "65504.0"
+@test string(reinterpret(Float16, 0x7bff)) == "6.55e4"
+
+@test log10(Float16(100)) == Float16(2.0)
+
+#  #9939 (and #9897)
+@test rationalize(Float16(0.1)) == 1//10

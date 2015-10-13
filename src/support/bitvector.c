@@ -1,3 +1,5 @@
+// This file is a part of Julia. License is MIT: http://julialang.org/license
+
 /*
   bit vector primitives
 */
@@ -58,7 +60,7 @@ u_int32_t bitvector_get(u_int32_t *b, u_int64_t n)
 #define lomask(n) (u_int32_t)((((u_int32_t)1)<<(n))-1)
 #define ONES32 ((u_int32_t)0xffffffff)
 
-#ifdef __INTEL_COMPILER
+#if defined(__INTEL_COMPILER) && !defined(__clang__)
 #define count_bits(b) _popcnt32(b)
 #else
 STATIC_INLINE u_int32_t count_bits(u_int32_t b)
@@ -118,7 +120,7 @@ uint64_t bitvector_next(uint32_t *b, uint64_t n0, uint64_t n)
     while (i < nw-1) {
         w = b[i];
         if (w != 0) {
-            return ntz(w) + (i<<5);
+            return ntz(w) + (((uint64_t)i)<<5);
         }
         i++;
     }

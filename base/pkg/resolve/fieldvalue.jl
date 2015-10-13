@@ -1,6 +1,9 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 module FieldValues
 
 using ...VersionWeights
+importall .....Base.Operators
 
 export FieldValue, Field, validmax, secondmax
 
@@ -25,7 +28,7 @@ immutable FieldValue
     l3::Int
     l4::Int128
 end
-FieldValue(l0::Int,l1::VersionWeight,l2::VersionWeight,l3::Int) = FieldValue(l0, l1, l2, l3, int128(0))
+FieldValue(l0::Int,l1::VersionWeight,l2::VersionWeight,l3::Int) = FieldValue(l0, l1, l2, l3, Int128(0))
 FieldValue(l0::Int,l1::VersionWeight,l2::VersionWeight) = FieldValue(l0, l1, l2, 0)
 FieldValue(l0::Int,l1::VersionWeight) = FieldValue(l0, l1, zero(VersionWeight))
 FieldValue(l0::Int) = FieldValue(l0, zero(VersionWeight))

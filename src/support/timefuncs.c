@@ -1,3 +1,5 @@
+// This file is a part of Julia. License is MIT: http://julialang.org/license
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +23,10 @@
 #endif
 
 #include "timefuncs.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #if defined(_OS_WINDOWS_)
 static double floattime(void)
@@ -65,3 +71,7 @@ void sleep_ms(int ms)
     select(0, NULL, NULL, NULL, &timeout);
 #endif
 }
+
+#ifdef __cplusplus
+}
+#endif

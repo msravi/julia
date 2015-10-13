@@ -1,56 +1,41 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 # definitions related to C interface
 
-import Core.Intrinsics.cglobal
+import Core.Intrinsics: cglobal, box, unbox
 
-# constants to match JL_RTLD_* in src/julia.h
-const RTLD_LOCAL     = 0x00000000
-const RTLD_GLOBAL    = 0x00000001
-const RTLD_LAZY      = 0x00000002
-const RTLD_NOW       = 0x00000004
-const RTLD_NODELETE  = 0x00000008
-const RTLD_NOLOAD    = 0x00000010
-const RTLD_DEEPBIND  = 0x00000020
-const RTLD_FIRST     = 0x00000040
+const OS_NAME = ccall(:jl_get_OS_NAME, Any, ())
 
-dlsym(hnd, s::Union(Symbol,String)) = ccall(:jl_dlsym, Ptr{Void}, (Ptr{Void}, Ptr{Uint8}), hnd, s)
-dlsym_e(hnd, s::Union(Symbol,String)) = ccall(:jl_dlsym_e, Ptr{Void}, (Ptr{Void}, Ptr{Uint8}), hnd, s)
-dlopen(s::String, flags::Integer) = ccall(:jl_load_dynamic_library, Ptr{Void}, (Ptr{Uint8},Uint32), s, flags)
-dlopen_e(s::String, flags::Integer) = ccall(:jl_load_dynamic_library_e, Ptr{Void}, (Ptr{Uint8},Uint32), s, flags)
-dlopen(s::String) = dlopen(s, RTLD_LAZY | RTLD_DEEPBIND)
-dlopen_e(s::String) = dlopen_e(s, RTLD_LAZY | RTLD_DEEPBIND)
-dlclose(p::Ptr) = if p!=C_NULL; ccall(:uv_dlclose,Void,(Ptr{Void},),p); end
-
-cfunction(f::Function, r, a) =
-    ccall(:jl_function_ptr, Ptr{Void}, (Any, Any, Any), f, r, a)
+cfunction(f::Function, r, a) = ccall(:jl_function_ptr, Ptr{Void}, (Any, Any, Any), f, r, a)
 
 if ccall(:jl_is_char_signed, Any, ())
     typealias Cchar Int8
 else
-    typealias Cchar Uint8
+    typealias Cchar UInt8
 end
-typealias Cuchar Uint8
+typealias Cuchar UInt8
 typealias Cshort Int16
-typealias Cushort Uint16
+typealias Cushort UInt16
 typealias Cint Int32
-typealias Cuint Uint32
+typealias Cuint UInt32
 if OS_NAME === :Windows
     typealias Clong Int32
-    typealias Culong Uint32
-    typealias Cwchar_t Uint16
+    typealias Culong UInt32
+    typealias Cwchar_t UInt16
 else
     typealias Clong Int
-    typealias Culong Uint
+    typealias Culong UInt
     typealias Cwchar_t Int32
 end
 typealias Cptrdiff_t Int
-typealias Csize_t Uint
+typealias Csize_t UInt
 typealias Cssize_t Int
+typealias Cintmax_t Int64
+typealias Cuintmax_t UInt64
 typealias Clonglong Int64
-typealias Culonglong Uint64
+typealias Culonglong UInt64
 typealias Cfloat Float32
 typealias Cdouble Float64
-#typealias Ccomplex_float Complex64
-#typealias Ccomplex_double Complex128
 
 const sizeof_off_t = ccall(:jl_sizeof_off_t, Cint, ())
 
@@ -61,6 +46,43 @@ else
 end
 
 typealias Coff_t FileOffset
+
+# C NUL-terminated string pointers; these can be used in ccall
+# instead of Ptr{Cchar} and Ptr{Cwchar_t}, respectively, to enforce
+# a check for embedded NUL chars in the string (to avoid silent truncation).
+if Int === Int64
+    bitstype 64 Cstring
+    bitstype 64 Cwstring
+else
+    bitstype 32 Cstring
+    bitstype 32 Cwstring
+end
+
+convert{T<:Union{Int8,UInt8}}(::Type{Cstring}, p::Ptr{T}) = box(Cstring, unbox(Ptr{T}, p))
+convert(::Type{Cwstring}, p::Ptr{Cwchar_t}) = box(Cwstring, unbox(Ptr{Cwchar_t}, p))
+convert{T<:Union{Int8,UInt8}}(::Type{Ptr{T}}, p::Cstring) = box(Ptr{T}, unbox(Cstring, p))
+convert(::Type{Ptr{Cwchar_t}}, p::Cwstring) = box(Ptr{Cwchar_t}, unbox(Cwstring, p))
+
+# here, not in pointer.jl, to avoid bootstrapping problems in coreimg.jl
+pointer_to_string(p::Cstring, own::Bool=false) = pointer_to_string(convert(Ptr{UInt8}, p), own)
+
+# convert strings to ByteString etc. to pass as pointers
+cconvert(::Type{Cstring}, s::AbstractString) = bytestring(s)
+cconvert(::Type{Cwstring}, s::AbstractString) = wstring(s)
+
+containsnul(p::Ptr, len) = C_NULL != ccall(:memchr, Ptr{Cchar}, (Ptr{Cchar}, Cint, Csize_t), p, 0, len)
+function unsafe_convert(::Type{Cstring}, s::ByteString)
+    p = unsafe_convert(Ptr{Cchar}, s)
+    if containsnul(p, sizeof(s))
+        throw(ArgumentError("embedded NUL chars are not allowed in C strings: $(repr(s))"))
+    end
+    return Cstring(p)
+end
+
+# symbols are guaranteed not to contain embedded NUL
+convert(::Type{Cstring}, s::Symbol) = Cstring(unsafe_convert(Ptr{Cchar}, s))
+
+# in string.jl: unsafe_convert(::Type{Cwstring}, s::WString)
 
 # deferring (or un-deferring) ctrl-c handler for external C code that
 # is not interrupt safe (see also issue #2622).  The sigatomic_begin/end
@@ -74,34 +96,12 @@ sigatomic_end() = ccall(:jl_sigatomic_end, Void, ())
 disable_sigint(f::Function) = try sigatomic_begin(); f(); finally sigatomic_end(); end
 reenable_sigint(f::Function) = try sigatomic_end(); f(); finally sigatomic_begin(); end
 
-# flush C stdio output from external libraries
-flush_cstdio() = ccall(:jl_flush_cstdio, Void, ())
-
-function find_library{T<:ByteString, S<:ByteString}(libnames::Array{T,1}, extrapaths::Array{S,1}=ASCIIString[])
-    for lib in libnames
-        for path in extrapaths
-            l = joinpath(path, lib)
-            p = dlopen_e(l, RTLD_LAZY)
-            if p != C_NULL
-                dlclose(p)
-                return l
-            end
-        end
-        p = dlopen_e(lib, RTLD_LAZY)
-        if p != C_NULL
-            dlclose(p)
-            return lib
-        end
-    end
-    return ""
+function ccallable(f::Function, rt::Type, argt::Type, name::Union{AbstractString,Symbol}=string(f))
+    ccall(:jl_extern_c, Void, (Any, Any, Any, Cstring), f, rt, argt, name)
 end
 
-function ccallable(f::Callable, rt::Type, argt::(Type...), name::Union(String,Symbol)=string(f))
-    ccall(:jl_extern_c, Void, (Any, Any, Any, Ptr{Uint8}), f, rt, argt, name)
-end
-
-function ccallable(f::Callable, argt::(Type...), name::Union(String,Symbol)=string(f))
-    ccall(:jl_extern_c, Void, (Any, Ptr{Void}, Any, Ptr{Uint8}), f, C_NULL, argt, name)
+function ccallable(f::Function, argt::Type, name::Union{AbstractString,Symbol}=string(f))
+    ccall(:jl_extern_c, Void, (Any, Ptr{Void}, Any, Cstring), f, C_NULL, argt, name)
 end
 
 macro ccallable(def)
@@ -118,7 +118,7 @@ macro ccallable(def)
             end
             return quote
                 $(esc(def))
-                ccallable($(esc(name)), $(Expr(:tuple, map(esc, at)...)))
+                ccallable($(esc(name)), $(Expr(:curly, :Tuple, map(esc, at)...)))
             end
         end
     end

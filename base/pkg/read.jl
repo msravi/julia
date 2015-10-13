@@ -1,12 +1,14 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 module Read
 
-import ..Git, ..Cache, ..Reqs
+import ...LibGit2, ..Cache, ..Reqs, ...Pkg.PkgError
 using ..Types
 
 readstrip(path...) = strip(readall(joinpath(path...)))
 
-url(pkg::String) = readstrip("METADATA", pkg, "url")
-sha1(pkg::String, ver::VersionNumber) = readstrip("METADATA", pkg, "versions", string(ver), "sha1")
+url(pkg::AbstractString) = readstrip("METADATA", pkg, "url")
+sha1(pkg::AbstractString, ver::VersionNumber) = readstrip("METADATA", pkg, "versions", string(ver), "sha1")
 
 function available(names=readdir("METADATA"))
     pkgs = Dict{ByteString,Dict{VersionNumber,Available}}()
@@ -17,7 +19,7 @@ function available(names=readdir("METADATA"))
         for ver in readdir(versdir)
             ismatch(Base.VERSION_REGEX, ver) || continue
             isfile(versdir, ver, "sha1") || continue
-            haskey(pkgs,pkg) || (pkgs[pkg] = eltype(pkgs)[2]())
+            haskey(pkgs,pkg) || (pkgs[pkg] = Dict{VersionNumber,Available}())
             pkgs[pkg][convert(VersionNumber,ver)] = Available(
                 readchomp(joinpath(versdir,ver,"sha1")),
                 Reqs.parse(joinpath(versdir,ver,"requires"))
@@ -26,57 +28,113 @@ function available(names=readdir("METADATA"))
     end
     return pkgs
 end
-available(pkg::String) = get(available([pkg]),pkg,Dict{VersionNumber,Available}())
+available(pkg::AbstractString) = get(available([pkg]),pkg,Dict{VersionNumber,Available}())
 
-isinstalled(pkg::String) =
+function latest(names=readdir("METADATA"))
+    pkgs = Dict{ByteString,Available}()
+    for pkg in names
+        isfile("METADATA", pkg, "url") || continue
+        versdir = joinpath("METADATA", pkg, "versions")
+        isdir(versdir) || continue
+        pkgversions = VersionNumber[]
+        for ver in readdir(versdir)
+            ismatch(Base.VERSION_REGEX, ver) || continue
+            isfile(versdir, ver, "sha1") || continue
+            push!(pkgversions, convert(VersionNumber,ver))
+        end
+        isempty(pkgversions) && continue
+        ver = string(maximum(pkgversions))
+        pkgs[pkg] = Available(
+                readchomp(joinpath(versdir,ver,"sha1")),
+                Reqs.parse(joinpath(versdir,ver,"requires"))
+            )
+    end
+    return pkgs
+end
+
+isinstalled(pkg::AbstractString) =
     pkg != "METADATA" && pkg != "REQUIRE" && pkg[1] != '.' && isdir(pkg)
 
-function isfixed(pkg::String, avail::Dict=available(pkg))
-    isinstalled(pkg) || error("$pkg is not an installed package.")
+function isfixed(pkg::AbstractString, prepo::LibGit2.GitRepo, avail::Dict=available(pkg))
+    isinstalled(pkg) || throw(PkgError("$pkg is not an installed package."))
     isfile("METADATA", pkg, "url") || return true
     ispath(pkg, ".git") || return true
-    Git.dirty(dir=pkg) && return true
-    Git.attached(dir=pkg) && return true
-    !Git.success(`cat-file -e HEAD:REQUIRE`, dir=pkg) && isfile(pkg,"REQUIRE") && return true
-    head = Git.head(dir=pkg)
+
+    LibGit2.isdirty(prepo) && return true
+    LibGit2.isattached(prepo) && return true
+    LibGit2.need_update(prepo)
+    LibGit2.iszero(LibGit2.revparseid(prepo, "HEAD:REQUIRE")) && isfile(pkg,"REQUIRE") && return true
+
+    head = string(LibGit2.head_oid(prepo))
     for (ver,info) in avail
         head == info.sha1 && return false
     end
+
     cache = Cache.path(pkg)
-    cache_has_head = isdir(cache) && Git.iscommit(head, dir=cache)
-    for (ver,info) in avail
-        if cache_has_head && Git.iscommit(info.sha1, dir=cache)
-            Git.is_ancestor_of(head, info.sha1, dir=cache) && return false
-        elseif Git.iscommit(info.sha1, dir=pkg)
-            Git.is_ancestor_of(head, info.sha1, dir=pkg) && return false
-        else
-            Base.warn_once("unknown $pkg commit $(info.sha1[1:8]), metadata may be ahead of package cache")
-        end
+    cache_has_head = if isdir(cache)
+        crepo = LibGit2.GitRepo(cache)
+        LibGit2.iscommit(head, crepo)
+    else
+        false
     end
-    return true
+    try
+        res = true
+        for (ver,info) in avail
+            if cache_has_head && LibGit2.iscommit(info.sha1, crepo)
+                if LibGit2.is_ancestor_of(head, info.sha1, crepo)
+                    res = false
+                    break
+                end
+            elseif LibGit2.iscommit(info.sha1, prepo)
+                if LibGit2.is_ancestor_of(head, info.sha1, prepo)
+                    res = false
+                    break
+                end
+            else
+                Base.warn_once("unknown $pkg commit $(info.sha1[1:8]), metadata may be ahead of package cache")
+            end
+        end
+    finally
+        cache_has_head && LibGit2.finalize(crepo)
+    end
+    return res
 end
 
-function installed_version(pkg::String, avail::Dict=available(pkg))
+function installed_version(pkg::AbstractString, prepo::LibGit2.GitRepo, avail::Dict=available(pkg))
     ispath(pkg,".git") || return typemin(VersionNumber)
-    head = Git.head(dir=pkg)
-    vers = [keys(filter((ver,info)->info.sha1==head, avail))...]
+
+    # get package repo head hash
+    head = string(LibGit2.head_oid(prepo))
+    isempty(head) && return typemin(VersionNumber)
+
+    vers = collect(keys(filter((ver,info)->info.sha1==head, avail)))
     !isempty(vers) && return maximum(vers)
+
     cache = Cache.path(pkg)
-    cache_has_head = isdir(cache) && Git.iscommit(head, dir=cache)
+    cache_has_head = if isdir(cache)
+        crepo = LibGit2.GitRepo(cache)
+        LibGit2.iscommit(head, crepo)
+    else
+        false
+    end
     ancestors = VersionNumber[]
     descendants = VersionNumber[]
-    for (ver,info) in avail
-        sha1 = info.sha1
-        base = if cache_has_head && Git.iscommit(sha1, dir=cache)
-            Git.readchomp(`merge-base $head $sha1`, dir=cache)
-        elseif Git.iscommit(sha1, dir=pkg)
-            Git.readchomp(`merge-base $head $sha1`, dir=pkg)
-        else
-            Base.warn_once("unknown $pkg commit $(sha1[1:8]), metadata may be ahead of package cache")
-            continue
+    try
+        for (ver,info) in avail
+            sha1 = info.sha1
+            base = if cache_has_head && LibGit2.iscommit(sha1, crepo)
+                LibGit2.merge_base(crepo, head, sha1)
+            elseif LibGit2.iscommit(sha1, prepo)
+                LibGit2.merge_base(prepo, head, sha1)
+            else
+                Base.warn_once("unknown $pkg commit $(sha1[1:8]), metadata may be ahead of package cache")
+                continue
+            end
+            string(base) == sha1 && push!(ancestors,ver)
+            string(base) == head && push!(descendants,ver)
         end
-        base == sha1 && push!(ancestors,ver)
-        base == head && push!(descendants,ver)
+    finally
+        cache_has_head && LibGit2.finalize(crepo)
     end
     both = sort!(intersect(ancestors,descendants))
     isempty(both) || warn("$pkg: some versions are both ancestors and descendants of head: $both")
@@ -91,12 +149,16 @@ function installed_version(pkg::String, avail::Dict=available(pkg))
     end
 end
 
-function requires_path(pkg::String, avail::Dict=available(pkg))
+function requires_path(pkg::AbstractString, avail::Dict=available(pkg))
     pkgreq = joinpath(pkg,"REQUIRE")
     ispath(pkg,".git") || return pkgreq
-    Git.dirty("REQUIRE", dir=pkg) && return pkgreq
-    !Git.success(`cat-file -e HEAD:REQUIRE`, dir=pkg) && isfile(pkgreq) && return pkgreq
-    head = Git.head(dir=pkg)
+    repo = LibGit2.GitRepo(pkg)
+    head = LibGit2.with(LibGit2.GitRepo, pkg) do repo
+        LibGit2.isdirty(repo, "REQUIRE") && return pkgreq
+        LibGit2.need_update(repo)
+        LibGit2.iszero(LibGit2.revparseid(repo, "HEAD:REQUIRE")) && isfile(pkgreq) && return pkgreq
+        string(LibGit2.head_oid(repo))
+    end
     for (ver,info) in avail
         if head == info.sha1
             return joinpath("METADATA", pkg, "versions", string(ver), "requires")
@@ -105,21 +167,27 @@ function requires_path(pkg::String, avail::Dict=available(pkg))
     return pkgreq
 end
 
-function requires_list(pkg::String, avail::Dict=available(pkg))
-    reqs = filter!(Reqs.read(requires_path(pkg,avail))) do line
-        isa(line,Reqs.Requirement)
-    end
-    map(req->req.package, reqs)
-end
-requires_dict(pkg::String, avail::Dict=available(pkg)) =
+requires_list(pkg::AbstractString, avail::Dict=available(pkg)) =
+    collect(keys(Reqs.parse(requires_path(pkg,avail))))
+
+requires_dict(pkg::AbstractString, avail::Dict=available(pkg)) =
     Reqs.parse(requires_path(pkg,avail))
 
 function installed(avail::Dict=available())
-    pkgs = Dict{ByteString,(VersionNumber,Bool)}()
+    pkgs = Dict{ByteString,Tuple{VersionNumber,Bool}}()
     for pkg in readdir()
         isinstalled(pkg) || continue
         ap = get(avail,pkg,Dict{VersionNumber,Available}())
-        pkgs[pkg] = (installed_version(pkg,ap),isfixed(pkg,ap))
+        prepo = LibGit2.GitRepo(pkg)
+        try
+            ver = installed_version(pkg, prepo, ap)
+            fixed = isfixed(pkg, prepo, ap)
+            pkgs[pkg] = (ver, fixed)
+        catch
+            pkgs[pkg] = (typemin(VersionNumber), true)
+        finally
+            finalize(prepo)
+        end
     end
     return pkgs
 end
@@ -143,6 +211,13 @@ function free(inst::Dict=installed())
         pkgs[pkg] = ver
     end
     return pkgs
+end
+
+function issue_url(pkg::AbstractString)
+    ispath(pkg,".git") || return ""
+    m = match(LibGit2.GITHUB_REGEX, url(pkg))
+    m === nothing && return ""
+    return "https://github.com/" * m.captures[1] * "/issues"
 end
 
 end # module

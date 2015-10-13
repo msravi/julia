@@ -1,3 +1,5 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 # Linear algebra functions for dense matrices in column major format
 
 ## BLAS cutoff threshold constants
@@ -17,10 +19,14 @@ function scale!{T<:BlasFloat}(X::Array{T}, s::T)
 end
 
 scale!{T<:BlasFloat}(X::Array{T}, s::Number) = scale!(X, convert(T, s))
-scale!{T<:BlasComplex}(X::Array{T}, s::Real) = BLAS.scal!(length(X), oftype(real(zero(T)),s), X, 1)
+function scale!{T<:BlasComplex}(X::Array{T}, s::Real)
+    R = typeof(real(zero(T)))
+    BLAS.scal!(2*length(X), convert(R,s), convert(Ptr{R},pointer(X)), 1)
+    X
+end
 
 #Test whether a matrix is positive-definite
-isposdef!{T<:BlasFloat}(A::StridedMatrix{T}, UL::Symbol) = LAPACK.potrf!(string(UL)[1], A)[2] == 0
+isposdef!{T<:BlasFloat}(A::StridedMatrix{T}, UL::Symbol) = LAPACK.potrf!(char_uplo(UL), A)[2] == 0
 isposdef!(A::StridedMatrix) = ishermitian(A) && isposdef!(A, :U)
 
 isposdef{T}(A::AbstractMatrix{T}, UL::Symbol) = (S = typeof(sqrt(one(T))); isposdef!(S == T ? copy(A) : convert(AbstractMatrix{S}, A), UL))
@@ -32,34 +38,46 @@ stride1(x::StridedVector) = stride(x, 1)::Int
 
 import Base: mapreduce_seq_impl, AbsFun, Abs2Fun, AddFun
 
-mapreduce_seq_impl{T<:BlasFloat}(::AbsFun, ::AddFun, a::Union(Array{T},StridedVector{T}), ifirst::Int, ilast::Int) =
+mapreduce_seq_impl{T<:BlasReal}(::AbsFun, ::AddFun, a::Union{Array{T},StridedVector{T}}, ifirst::Int, ilast::Int) =
     BLAS.asum(ilast-ifirst+1, pointer(a, ifirst), stride1(a))
 
-function mapreduce_seq_impl{T<:BlasFloat}(::Abs2Fun, ::AddFun, a::Union(Array{T},StridedVector{T}), ifirst::Int, ilast::Int)
+function mapreduce_seq_impl{T<:BlasReal}(::Abs2Fun, ::AddFun, a::Union{Array{T},StridedVector{T}}, ifirst::Int, ilast::Int)
     n = ilast-ifirst+1
     px = pointer(a, ifirst)
     incx = stride1(a)
     BLAS.dot(n, px, incx, px, incx)
 end
 
-function norm{T<:BlasFloat, TI<:Integer}(x::StridedVector{T}, rx::Union(UnitRange{TI},Range{TI}))
-    (minimum(rx) < 1 || maximum(rx) > length(x)) && throw(BoundsError())
+function mapreduce_seq_impl{T<:BlasComplex}(::Abs2Fun, ::AddFun, a::Union{Array{T},StridedVector{T}}, ifirst::Int, ilast::Int)
+    n = ilast-ifirst+1
+    px = pointer(a, ifirst)
+    incx = stride1(a)
+    real(BLAS.dotc(n, px, incx, px, incx))
+end
+
+function norm{T<:BlasFloat, TI<:Integer}(x::StridedVector{T}, rx::Union{UnitRange{TI},Range{TI}})
+    if minimum(rx) < 1 || maximum(rx) > length(x)
+        throw(BoundsError(x, rx))
+    end
     BLAS.nrm2(length(rx), pointer(x)+(first(rx)-1)*sizeof(T), step(rx))
 end
 
-vecnorm1{T<:BlasReal}(x::Union(Array{T},StridedVector{T})) = 
+vecnorm1{T<:BlasReal}(x::Union{Array{T},StridedVector{T}}) =
     length(x) < ASUM_CUTOFF ? generic_vecnorm1(x) : BLAS.asum(x)
 
-vecnorm2{T<:BlasFloat}(x::Union(Array{T},StridedVector{T})) = 
+vecnorm2{T<:BlasFloat}(x::Union{Array{T},StridedVector{T}}) =
     length(x) < NRM2_CUTOFF ? generic_vecnorm2(x) : BLAS.nrm2(x)
 
-function triu!{T}(M::Matrix{T}, k::Integer)
+function triu!(M::AbstractMatrix, k::Integer)
     m, n = size(M)
+    if (k > 0 && k > n) || (k < 0 && -k > m)
+        throw(ArgumentError("requested diagonal, $k, out of bounds in matrix of size ($m,$n)"))
+    end
     idx = 1
     for j = 0:n-1
         ii = min(max(0, j+1-k), m)
         for i = (idx+ii):(idx+m-1)
-            M[i] = zero(T)
+            M[i] = zero(M[i])
         end
         idx += m
     end
@@ -68,13 +86,16 @@ end
 
 triu(M::Matrix, k::Integer) = triu!(copy(M), k)
 
-function tril!{T}(M::Matrix{T}, k::Integer)
+function tril!(M::AbstractMatrix, k::Integer)
     m, n = size(M)
+    if (k > 0 && k > n) || (k < 0 && -k > m)
+        throw(ArgumentError("requested diagonal, $k, out of bounds in matrix of size ($m,$n)"))
+    end
     idx = 1
     for j = 0:n-1
         ii = min(max(0, j-k), m)
         for i = idx:(idx+ii-1)
-            M[i] = zero(T)
+            M[i] = zero(M[i])
         end
         idx += m
     end
@@ -101,20 +122,22 @@ function gradient(F::Vector, h::Vector)
 end
 
 function diagind(m::Integer, n::Integer, k::Integer=0)
-    -m <= k <= n || throw(BoundsError())
+    if !(-m <= k <= n)
+        throw(ArgumentError("requested diagonal, $k, out of bounds in matrix of size ($m,$n)"))
+    end
     k <= 0 ? range(1-k, m+1, min(m+k, n)) : range(k*m+1, m+1, min(m, n-k))
 end
 
 diagind(A::AbstractMatrix, k::Integer=0) = diagind(size(A,1), size(A,2), k)
 
-diag(A::Matrix, k::Integer=0) = A[diagind(A,k)]
+diag(A::AbstractMatrix, k::Integer=0) = A[diagind(A,k)]
 
 function diagm{T}(v::AbstractVector{T}, k::Integer=0)
     n = length(v) + abs(k)
     A = zeros(T,n,n)
     A[diagind(A,k)] = v
     A
-end  
+end
 
 diagm(x::Number) = (X = Array(typeof(x),1,1); X[1,1] = x; X)
 
@@ -140,8 +163,8 @@ function kron{T,S}(a::Matrix{T}, b::Matrix{S})
     R
 end
 
-kron(a::Number, b::Union(Number, Vector, Matrix)) = a * b 
-kron(a::Union(Vector, Matrix), b::Number) = a * b 
+kron(a::Number, b::Union{Number, Vector, Matrix}) = a * b
+kron(a::Union{Vector, Matrix}, b::Number) = a * b
 kron(a::Vector, b::Vector)=vec(kron(reshape(a,length(a),1),reshape(b,length(b),1)))
 kron(a::Matrix, b::Vector)=kron(a,reshape(b,length(b),1))
 kron(a::Vector, b::Matrix)=kron(reshape(a,length(a),1),b)
@@ -149,50 +172,15 @@ kron(a::Vector, b::Matrix)=kron(reshape(a,length(a),1),b)
 ^(A::Matrix, p::Integer) = p < 0 ? inv(A^-p) : Base.power_by_squaring(A,p)
 
 function ^(A::Matrix, p::Number)
-    isinteger(p) && return A^integer(real(p)) 
-    
+    if isinteger(p)
+        return A^Integer(real(p))
+    end
     chksquare(A)
     v, X = eig(A)
     any(v.<0) && (v = complex(v))
     Xinv = ishermitian(A) ? X' : inv(X)
     scale(X, v.^p)*Xinv
 end
-
-function rref{T}(A::Matrix{T})
-    nr, nc = size(A)
-    U = copy!(similar(A, T <: Complex ? Complex128 : Float64), A)
-    e = eps(norm(U,Inf))
-    i = j = 1
-    while i <= nr && j <= nc
-        (m, mi) = findmax(abs(U[i:nr,j]))
-        mi = mi+i - 1
-        if m <= e
-            U[i:nr,j] = 0
-            j += 1
-        else
-            for k=j:nc
-                U[i, k], U[mi, k] = U[mi, k], U[i, k]
-            end
-            d = U[i,j]
-            for k = j:nc
-                U[i,k] /= d
-            end
-            for k = 1:nr
-                if k != i
-                    d = U[k,j]
-                    for l = j:nc
-                        U[k,l] -= d*U[i,l]
-                    end
-                end
-            end
-            i += 1
-            j += 1
-        end
-    end
-    U
-end
-
-rref(x::Number) = one(x)
 
 # Matrix exponential
 expm{T<:BlasFloat}(A::StridedMatrix{T}) = expm!(copy(A))
@@ -203,7 +191,9 @@ expm(x::Number) = exp(x)
 ## "Functions of Matrices: Theory and Computation", SIAM
 function expm!{T<:BlasFloat}(A::StridedMatrix{T})
     n = chksquare(A)
-    n<2 && return exp(A)
+    if ishermitian(A)
+        return full(expm(Hermitian(A)))
+    end
     ilo, ihi, scale = LAPACK.gebal!('B', A)    # modifies A
     nA   = norm(A, 1)
     I    = eye(T,n)
@@ -238,8 +228,8 @@ function expm!{T<:BlasFloat}(A::StridedMatrix{T})
     else
         s  = log2(nA/5.4)               # power of 2 later reversed by squaring
         if s > 0
-            si = iceil(s)
-            A /= oftype(T,2^si)
+            si = ceil(Int,s)
+            A /= convert(T,2^si)
         end
         CC = T[64764752532480000.,32382376266240000.,7771770303897600.,
                 1187353796428800.,  129060195264000.,  10559470521600.,
@@ -256,13 +246,13 @@ function expm!{T<:BlasFloat}(A::StridedMatrix{T})
 
         X = V + U
         LAPACK.gesv!(V-U, X)
-    
+
         if s > 0            # squaring to reverse dividing by power of 2
             for t=1:si X *= X end
         end
     end
 
-	# Undo the balancing
+    # Undo the balancing
     for j = ilo:ihi
         scj = scale[j]
         for i = 1:n
@@ -274,10 +264,10 @@ function expm!{T<:BlasFloat}(A::StridedMatrix{T})
     end
 
     if ilo > 1       # apply lower permutations in reverse order
-        for j in (ilo-1):-1:1 rcswap!(j, int(scale[j]), X) end
+        for j in (ilo-1):-1:1 rcswap!(j, Int(scale[j]), X) end
     end
     if ihi < n       # apply upper permutations in forward order
-        for j in (ihi+1):n    rcswap!(j, int(scale[j]), X) end
+        for j in (ihi+1):n    rcswap!(j, Int(scale[j]), X) end
     end
     X
 end
@@ -292,35 +282,84 @@ function rcswap!{T<:Number}(i::Integer, j::Integer, X::StridedMatrix{T})
     end
 end
 
-function sqrtm{T<:Real}(A::StridedMatrix{T})
-    issym(A) && return sqrtm(Symmetric(A))
+function logm(A::StridedMatrix)
+    # If possible, use diagonalization
+    if ishermitian(A)
+        return full(logm(Hermitian(A)))
+    end
+
+    # Use Schur decomposition
     n = chksquare(A)
-    SchurF = schurfact(complex(A))
-    R = full(sqrtm(Triangular(SchurF[:T], :U, false)))
-    retmat = SchurF[:vectors]*R*SchurF[:vectors]'
-    all(imag(retmat) .== 0) ? real(retmat) : retmat
+    if istriu(A)
+        retmat = full(logm(UpperTriangular(complex(A))))
+        d = diag(A)
+    else
+        S,Q,d = schur(complex(A))
+        R = logm(UpperTriangular(S))
+        retmat = Q * R * Q'
+    end
+
+    # Check whether the matrix has nonpositive real eigs
+    np_real_eigs = false
+    for i = 1:n
+        if imag(d[i]) < eps() && real(d[i]) <= 0
+            np_real_eigs = true
+            break
+        end
+    end
+    if np_real_eigs
+        warn("Matrix with nonpositive real eigenvalues, a nonprincipal matrix logarithm will be returned.")
+    end
+
+    if isreal(A) && ~np_real_eigs
+        return real(retmat)
+    else
+        return retmat
+    end
+end
+logm(a::Number) = (b = log(complex(a)); imag(b) == 0 ? real(b) : b)
+logm(a::Complex) = log(a)
+
+function sqrtm{T<:Real}(A::StridedMatrix{T})
+    if issym(A)
+        return full(sqrtm(Symmetric(A)))
+    end
+    n = chksquare(A)
+    if istriu(A)
+        return full(sqrtm(UpperTriangular(A)))
+    else
+        SchurF = schurfact(complex(A))
+        R = full(sqrtm(UpperTriangular(SchurF[:T])))
+        return SchurF[:vectors] * R * SchurF[:vectors]'
+    end
 end
 function sqrtm{T<:Complex}(A::StridedMatrix{T})
-    ishermitian(A) && return sqrtm(Hermitian(A))
+    if ishermitian(A)
+        return full(sqrtm(Hermitian(A)))
+    end
     n = chksquare(A)
-    SchurF = schurfact(A)
-    R = full(sqrtm(Triangular(SchurF[:T], :U, false)))
-    SchurF[:vectors]*R*SchurF[:vectors]'
+    if istriu(A)
+        return full(sqrtm(UpperTriangular(A)))
+    else
+        SchurF = schurfact(A)
+        R = full(sqrtm(UpperTriangular(SchurF[:T])))
+        return SchurF[:vectors] * R * SchurF[:vectors]'
+    end
 end
 sqrtm(a::Number) = (b = sqrt(complex(a)); imag(b) == 0 ? real(b) : b)
 sqrtm(a::Complex) = sqrt(a)
 
-function inv{S}(A::StridedMatrix{S})
-    T = typeof(one(S)/one(S))
-    Ac = convert(AbstractMatrix{T}, A)
-    if istriu(Ac)
-        Ai = inv(Triangular(A, :U, false))
-    elseif istril(Ac) 
-        Ai = inv(Triangular(A, :L, false))
-    else 
-        Ai = inv(lufact(Ac))
+function inv{T}(A::StridedMatrix{T})
+    S = typeof((one(T)*zero(T) + one(T)*zero(T))/one(T))
+    AA = convert(AbstractArray{S}, A)
+    if istriu(AA)
+        Ai = inv(UpperTriangular(AA))
+    elseif istril(AA)
+        Ai = inv(LowerTriangular(AA))
+    else
+        Ai = inv(lufact(AA))
     end
-    return convert(typeof(Ac), Ai)
+    return convert(typeof(AA), Ai)
 end
 
 function factorize{T}(A::Matrix{T})
@@ -366,14 +405,14 @@ function factorize{T}(A::Matrix{T})
                 if utri1
                     return Bidiagonal(diag(A), diag(A, -1), false)
                 end
-                return Triangular(A, :L)
+                return LowerTriangular(A)
             end
             if utri
                 return Bidiagonal(diag(A), diag(A, 1), true)
             end
             if utri1
                 if (herm & (T <: Complex)) | sym
-                    try 
+                    try
                         return ldltfact!(SymTridiagonal(diag(A), diag(A, -1)))
                     end
                 end
@@ -381,7 +420,7 @@ function factorize{T}(A::Matrix{T})
             end
         end
         if utri
-            return Triangular(A, :U)
+            return UpperTriangular(A)
         end
         if herm
             try
@@ -394,56 +433,83 @@ function factorize{T}(A::Matrix{T})
         end
         return lufact(A)
     end
-    qrfact(A,pivot=T<:BlasFloat)
+    qrfact(A, Val{true})
 end
 
 (\)(a::Vector, B::StridedVecOrMat) = (\)(reshape(a, length(a), 1), B)
+
 function (\)(A::StridedMatrix, B::StridedVecOrMat)
     m, n = size(A)
     if m == n
         if istril(A)
-            return istriu(A) ? \(Diagonal(A),B) : \(Triangular(A, :L),B) 
+            return istriu(A) ? \(Diagonal(A),B) : \(LowerTriangular(A),B)
         end
-        istriu(A) && return \(Triangular(A, :U),B)
+        istriu(A) && return \(UpperTriangular(A),B)
         return \(lufact(A),B)
     end
-    return qrfact(A,pivot=eltype(A)<:BlasFloat)\B
+    return qrfact(A,Val{true})\B
 end
 
-## Moore-Penrose inverse
-function pinv{T}(A::StridedMatrix{T})
+## Moore-Penrose pseudoinverse
+function pinv{T}(A::StridedMatrix{T}, tol::Real)
+    m, n = size(A)
+    Tout = typeof(zero(T)/sqrt(one(T) + one(T)))
+    if m == 0 || n == 0
+        return Array(Tout, n, m)
+    end
+    if istril(A)
+        if istriu(A)
+            maxabsA = maximum(abs(diag(A)))
+            B = zeros(Tout, n, m);
+            for i = 1:min(m, n)
+                if abs(A[i,i]) > tol*maxabsA
+                    Aii = inv(A[i,i])
+                    if isfinite(Aii)
+                        B[i,i] = Aii
+                    end
+                end
+            end
+            return B;
+        end
+    end
     SVD         = svdfact(A, thin=true)
-    S           = eltype(SVD[:S])
-    m, n        = size(A)
-    (m == 0 || n == 0) && return Array(S, n, m)
-    Sinv        = zeros(S, length(SVD[:S]))
-    index       = SVD[:S] .> eps(real(float(one(T))))*max(m,n)*maximum(SVD[:S])
-    Sinv[index] = one(S) ./ SVD[:S][index]
-    return SVD[:Vt]'scale(Sinv, SVD[:U]')
+    Stype       = eltype(SVD.S)
+    Sinv        = zeros(Stype, length(SVD.S))
+    index       = SVD.S .> tol*maximum(SVD.S)
+    Sinv[index] = one(Stype) ./ SVD.S[index]
+    Sinv[find(!isfinite(Sinv))] = zero(Stype)
+    return SVD.Vt'scale(Sinv, SVD.U')
+end
+function pinv{T}(A::StridedMatrix{T})
+    tol = eps(real(float(one(T))))*maximum(size(A))
+    return pinv(A, tol)
 end
 pinv(a::StridedVector) = pinv(reshape(a, length(a), 1))
-pinv(x::Number) = one(x)/x
+function pinv(x::Number)
+    xi = inv(x)
+    return ifelse(isfinite(xi), xi, zero(xi))
+end
 
 ## Basis for null space
-function null{T}(A::StridedMatrix{T})
+function nullspace{T}(A::StridedMatrix{T})
     m, n = size(A)
     (m == 0 || n == 0) && return eye(T, n)
-    SVD = svdfact(A, thin=false)
-    indstart = sum(SVD[:S] .> max(m,n)*maximum(SVD[:S])*eps(eltype(SVD[:S]))) + 1
-    return SVD[:V][:,indstart:end]
+    SVD = svdfact(A, thin = false)
+    indstart = sum(SVD.S .> max(m,n)*maximum(SVD.S)*eps(eltype(SVD.S))) + 1
+    return SVD.Vt[indstart:end,:]'
 end
-null(a::StridedVector) = null(reshape(a, length(a), 1))
+nullspace(a::StridedVector) = nullspace(reshape(a, length(a), 1))
 
-function cond(A::StridedMatrix, p::Real=2) 
+function cond(A::AbstractMatrix, p::Real=2)
     if p == 2
         v = svdvals(A)
         maxv = maximum(v)
-        return maxv == 0.0 ? inf(typeof(real(A[1,1]))) : maxv / minimum(v)
+        return maxv == 0.0 ? oftype(real(A[1,1]),Inf) : maxv / minimum(v)
     elseif p == 1 || p == Inf
         chksquare(A)
         return cond(lufact(A), p)
     end
-    throw(ArgumentError("invalid p-norm p=$p. Valid: 1, 2 or Inf"))
+    throw(ArgumentError("p-norm must be 1, 2 or Inf, got $p"))
 end
 
 ## Lyapunov and Sylvester equation
@@ -469,4 +535,3 @@ function lyap{T<:BlasFloat}(A::StridedMatrix{T},C::StridedMatrix{T})
 end
 lyap{T<:Integer}(A::StridedMatrix{T},C::StridedMatrix{T}) = lyap(float(A), float(C))
 lyap{T<:Number}(a::T, c::T) = -c/(2a)
-                                    

@@ -1,4 +1,6 @@
-immutable LDLt{T,S<:AbstractMatrix{T}} <: Factorization{T}
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
+immutable LDLt{T,S<:AbstractMatrix} <: Factorization{T}
     data::S
 end
 
@@ -13,45 +15,71 @@ convert{T,S,U<:AbstractMatrix}(::Type{LDLt{T}}, F::LDLt{S,U}) = convert(LDLt{T,U
 convert{T,S,U}(::Type{Factorization{T}}, F::LDLt{S,U}) = convert(LDLt{T,U}, F)
 
 # SymTridiagonal
+doc"""
+
+    ldltfact!(::SymTridiagonal) -> LDLt
+
+Same as `ldltfact`, but saves space by overwriting the input `A`, instead of creating a copy.
+"""
 function ldltfact!{T<:Real}(S::SymTridiagonal{T})
-	n = size(S,1)
-	d = S.dv
-	e = S.ev
-	@inbounds for i = 1:n-1
-		e[i] /= d[i]
-		d[i+1] -= abs2(e[i])*d[i]
-		d[i+1] > 0 || throw(PosDefException(i+1))
-	end
-	return LDLt{T,SymTridiagonal{T}}(S)
+    n = size(S,1)
+    d = S.dv
+    e = S.ev
+    @inbounds @simd for i = 1:n-1
+        e[i] /= d[i]
+        d[i+1] -= abs2(e[i])*d[i]
+    end
+    return LDLt{T,SymTridiagonal{T}}(S)
 end
+
+doc"""
+    ldltfact(::SymTridiagonal) -> LDLt
+
+Compute an `LDLt` factorization of a real symmetric tridiagonal matrix such that `A = L*Diagonal(d)*L'` where `L` is a unit lower triangular matrix and `d` is a vector. The main use of an `LDLt` factorization `F = ldltfact(A)` is to solve the linear system of equations `Ax = b` with `F\b`.
+
+"""
 function ldltfact{T}(M::SymTridiagonal{T})
-	S = typeof(one(T)/one(T))
-	return S == T ? ldltfact!(copy(M)) : ldltfact!(convert(SymTridiagonal{S}, M))
+    S = typeof(zero(T)/one(T))
+    return S == T ? ldltfact!(copy(M)) : ldltfact!(convert(SymTridiagonal{S}, M))
 end
+
+factorize(S::SymTridiagonal) = ldltfact(S)
+
 function A_ldiv_B!{T}(S::LDLt{T,SymTridiagonal{T}}, B::AbstractVecOrMat{T})
-	n, nrhs = size(B, 1), size(B, 2)
-	size(S,1) == n || throw(DimensionMismatch(""))
-	d = S.data.dv
-	l = S.data.ev
-	@inbounds begin
-		for i = 2:n
-			li1 = l[i-1]
-			for j = 1:nrhs
-				B[i,j] -= li1*B[i-1,j]
-			end
-		end
-		dn = d[n]
-		for j = 1:nrhs
-			B[n,j] /= dn
-		end
-		for i = n-1:-1:1
-			di = d[i]
-			li = l[i]
-			for j = 1:nrhs
-				B[i,j] /= di
-				B[i,j] -= li*B[i+1,j]
-			end
-		end
-	end
-	return B
+    n, nrhs = size(B, 1), size(B, 2)
+    if size(S,1) != n
+        throw(DimensionMismatch("Matrix has dimensions $(size(S)) but right hand side has first dimension $n"))
+    end
+    d = S.data.dv
+    l = S.data.ev
+    @inbounds begin
+        for i = 2:n
+            li1 = l[i-1]
+            @simd for j = 1:nrhs
+                B[i,j] -= li1*B[i-1,j]
+            end
+        end
+        dn = d[n]
+        @simd for j = 1:nrhs
+            B[n,j] /= dn
+        end
+        for i = n-1:-1:1
+            di = d[i]
+            li = l[i]
+            @simd for j = 1:nrhs
+                B[i,j] /= di
+                B[i,j] -= li*B[i+1,j]
+            end
+        end
+    end
+    return B
+end
+
+## reconstruct the original matrix, which is tridiagonal
+function full(F::LDLt)
+    e = copy(F.data.ev)
+    d = copy(F.data.dv)
+    e .*= d[1:end-1]
+    d[2:end] += e .* F.data.ev
+    SymTridiagonal(d, e)
 end

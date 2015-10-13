@@ -76,96 +76,25 @@ Supplying the number of expressions
 The first argument to both of these macros is the number of
 expressions, which must be an integer. When you're writing a function
 that you intend to work in multiple dimensions, this may not be
-something you want to hard-code.  Perhaps the most straightforward
-approach is to use the ``@ngenerate`` macro.
+something you want to hard-code. If you're writing code that
+you need to work with older julia versions, currently you
+should use the ``@ngenerate`` macro described in `an older version of this documentation <http://docs.julialang.org/en/release-0.3/devdocs/cartesian/#supplying-the-number-of-expressions>`_.
 
-Perhaps the easiest way to understand ``@ngenerate`` is to see it in
-action.  Here's a slightly cleaned up example::
+Starting in Julia 0.4-pre, the recommended approach is to use
+a ``@generated function``.  Here's an example::
 
-    julia> macroexpand(:(@ngenerate N typeof(A) function mysum{T,N}(A::Array{T,N})
-            s = zero(T)
-            @nloops N i A begin
-                s += @nref N A i
-            end
-            s
-        end))
-    :(begin
-        function mysum{T}(A::Array{T,1}) # none, line 2:
-            s = zero(T) # line 3:
-            for i_1 = 1:size(A,1) # line 293:
-                s += A[i_1]
-            end # line 295:
-            s
-        end
-        function mysum{T}(A::Array{T,2}) # none, line 2:
-            s = zero(T) # line 3:
-            for i_2 = 1:size(A,2) # line 293:
-                for i_1 = 1:size(A,1) # line 293:
-                    s += A[i_1,i_2]
-                end # line 295:
-            end # line 295:
-            s
-        end
-        function mysum{T}(A::Array{T,3}) # none, line 2:
-            s = zero(T) # line 3:
-            for i_3 = 1:size(A,3) # line 293:
-                for i_2 = 1:size(A,2) # line 293:
-                    for i_1 = 1:size(A,1) # line 293:
-                        s += A[i_1,i_2,i_3]
-                    end # line 295:
-                end # line 295:
-            end # line 295:
-            s
-        end
-        function mysum{T}(A::Array{T,4}) # none, line 2:
-            ...
-        end
-        let mysum_cache = Dict{Int,Function}() # line 113:
-            function mysum{T,N}(A::Array{T,N}) # cartesian.jl, line 100:
-                if !(haskey(mysum_cache,N)) # line 102:
-                    localfunc = quote
-		        function _F_{T}(A::Array{T,$N})
-                            s = zero(T)
-                            @nloops $N i A begin
-                                s += @nref $N A i
-                            end
-                            s
-                        end
-                    end
-		    mysum_cache[N] = eval(quote
-                        local _F_
-                        $localfunc
-                        _F_
-                    end)
-                end
-                mysum_cache[N](A)::typeof(A)
-            end
-        end
-    end)
+  @generated function mysum{T,N}(A::Array{T,N})
+      quote
+          s = zero(T)
+          @nloops $N i A begin
+              s += @nref $N A i
+          end
+          s
+      end
+  end
 
-You can see that ``@ngenerate`` causes explicit versions to be
-generated for dimensions 1 to 4 (a setting controlled by the constant
-``CARTESIAN_DIMS``).  To allow arbitrary-dimensional arrays to be
-handled, it also generates a version in which different methods are
-cached in a dictionary.  If a given method has not yet been generated,
-it creates a version specific to that dimensionality and then stores
-it in the dictionary.  Creating the method is slow---it involves
-generating expressions and then evaluating them---but once created the
-function can be looked up from the cache, and is reasonably efficient
-(but still less efficient than the versions generated for explicit
-dimensionality).
-
-The arguments to ``@ngenerate`` are:
-
-- The symbol of the variable that will be used for generating
-  different versions (in the example, ``N``)
-- The return type of the function (in the example,
-  ``typeof(A)``). This is not used for the versions that are generated
-  for specific ``N``, but is needed for the dictionary-backed
-  version.  Julia cannot infer the return type of the function looked
-  up from the dictionary.
-- The actual function declaration.  Use ``N`` as you would a normal
-  parameter.
+Naturally, you can also prepare expressions or perform calculations
+before the ``quote`` block.
 
 
 Anonymous-function expressions as macro arguments
@@ -207,97 +136,80 @@ Anonymous-function expressions have many uses in practice.
 Macro reference
 ~~~~~~~~~~~~~~~
 
-Macros for creating functions
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-.. function:: @ngenerate Nsym returntypeexpr functiondeclexpr
-
-    Generate versions of a function for different values of ``Nsym``.
-
-.. function:: @nsplat Nsym functiondeclexpr
-              @nsplat Nsym dimrange functiondeclexpr
-
-    Generate explicit versions of a function for different numbers of
-    arguments.  For example::
-
-        @nsplat N 2:3 absgetindex(A, I::NTuple{N,Real}...) = abs(getindex(A, I...))
-
-    generates::
-
-        absgetindex(A, I_1::Real, I_2::Real) = abs(getindex(A, I_1, I_2))
-        absgetindex(A, I_1::Real, I_2::Real, I_3::Real) = abs(getindex(A, I_1, I_2, I_3))
-
-
-Macros for function bodies
-^^^^^^^^^^^^^^^^^^^^^^^^^^
-
 .. function:: @nloops N itersym rangeexpr bodyexpr
               @nloops N itersym rangeexpr preexpr bodyexpr
               @nloops N itersym rangeexpr preexpr postexpr bodyexpr
 
-    Generate ``N`` nested loops, using ``itersym`` as the prefix for
-    the iteration variables. ``rangeexpr`` may be an
-    anonymous-function expression, or a simple symbol ``var`` in which
-    case the range is ``1:size(var,d)`` for dimension ``d``.
+   .. Docstring generated from Julia source
 
-    Optionally, you can provide "pre" and "post" expressions. These
-    get executed first and last, respectively, in the body of each
-    loop. For example,
-    ::
+   Generate ``N`` nested loops, using ``itersym`` as the prefix for the iteration variables. ``rangeexpr`` may be an anonymous-function expression, or a simple symbol ``var`` in which case the range is ``1:size(var,d)`` for dimension ``d``\ .
 
-        @nloops 2 i A d->j_d=min(i_d,5) begin
-            s += @nref 2 A j
-        end
+   Optionally, you can provide "pre" and "post" expressions. These get executed first and last, respectively, in the body of each loop. For example, :
 
-    would generate
-    ::
+   .. code-block:: julia
 
-        for i_2 = 1:size(A, 2)
-            j_2 = min(i_2, 5)
-            for i_1 = 1:size(A, 1)
-                j_1 = min(i_1, 5)
-                s += A[j_1,j_2]
-            end
-        end
+       @nloops 2 i A d->j_d=min(i_d,5) begin
+           s += @nref 2 A j
+       end
 
-    If you want just a post-expression, supply
-    ``nothing`` for the pre-expression. Using parenthesis and
-    semicolons, you can supply multi-statement expressions.
+   would generate :
+
+   .. code-block:: julia
+
+       for i_2 = 1:size(A, 2)
+           j_2 = min(i_2, 5)
+           for i_1 = 1:size(A, 1)
+               j_1 = min(i_1, 5)
+               s += A[j_1,j_2]
+           end
+       end
+
+   If you want just a post-expression, supply ``nothing`` for the pre-expression. Using parenthesis and semicolons, you can supply multi-statement expressions.
 
 .. function:: @nref N A indexexpr
 
-    Generate expressions like ``A[i_1,i_2,...]``.  ``indexexpr`` can
-    either be an iteration-symbol prefix, or an anonymous-function
-    expression.
+   .. Docstring generated from Julia source
 
-.. function:: @nexpr N expr
+   Generate expressions like ``A[i_1,i_2,...]``\ . ``indexexpr`` can either be an iteration-symbol prefix, or an anonymous-function expression.
 
-    Generate ``N`` expressions. ``expr`` should be an
-    anonymous-function expression.
+.. function:: @nexprs N expr
+
+   .. Docstring generated from Julia source
+
+   Generate ``N`` expressions. ``expr`` should be an anonymous-function expression.
 
 .. function:: @ntuple N expr
 
-    Generates an ``N``-tuple.  ``@ntuple 2 i`` would generate ``(i_1, i_2)``, and ``@ntuple 2 k->k+1`` would generate ``(2,3)``.
+   .. Docstring generated from Julia source
+
+   Generates an ``N``\ -tuple. ``@ntuple 2 i`` would generate ``(i_1, i_2)``\ , and ``@ntuple 2 k->k+1`` would generate ``(2,3)``\ .
 
 .. function:: @nall N expr
 
-    ``@nall 3 d->(i_d > 1)`` would generate the expression
-    ``(i_1 > 1 && i_2 > 1 && i_3 > 1)``. This can be convenient for
-    bounds-checking.
+   .. Docstring generated from Julia source
+
+   ``@nall 3 d->(i_d > 1)`` would generate the expression ``(i_1 > 1 && i_2 > 1 && i_3 > 1)``\ . This can be convenient for bounds-checking.
 
 .. function:: @nif N conditionexpr expr
               @nif N conditionexpr expr elseexpr
 
-    Generates a sequence of ``if ... elseif ... else ... end`` statements. For example::
+   .. Docstring generated from Julia source
 
-        @nif 3 d->(i_d >= size(A,d)) d->(error("Dimension ", d, " too big")) d->println("All OK")
+   Generates a sequence of ``if ... elseif ... else ... end`` statements. For example:
 
-    would generate::
+   .. code-block:: julia
 
-        if i_1 > size(A, 1)
-	    error("Dimension ", 1, " too big")
-        elseif i_2 > size(A, 2)
-	    error("Dimension ", 2, " too big")
-        else
-	    println("All OK")
-	end
+       @nif 3 d->(i_d >= size(A,d)) d->(error("Dimension ", d, " too big")) d->println("All OK")
+
+   would generate:
+
+   .. code-block:: julia
+
+       if i_1 > size(A, 1)
+           error("Dimension ", 1, " too big")
+       elseif i_2 > size(A, 2)
+           error("Dimension ", 2, " too big")
+       else
+           println("All OK")
+       end
+

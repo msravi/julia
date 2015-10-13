@@ -1,34 +1,38 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 module Reqs
 
+import Base: ==
+import ...Pkg.PkgError
 using ..Types
 
 # representing lines of REQUIRE files
 
 abstract Line
 immutable Comment <: Line
-    content::String
+    content::AbstractString
 end
 immutable Requirement <: Line
-    content::String
-    package::String
+    content::AbstractString
+    package::AbstractString
     versions::VersionSet
-    system::Vector{String}
+    system::Vector{AbstractString}
 
-    function Requirement(content::String)
+    function Requirement(content::AbstractString)
         fields = split(replace(content, r"#.*$", ""))
-        system = String[]
+        system = AbstractString[]
         while !isempty(fields) && fields[1][1] == '@'
             push!(system,shift!(fields)[2:end])
         end
-        isempty(fields) && error("invalid requires entry: $content")
+        isempty(fields) && throw(PkgError("invalid requires entry: $content"))
         package = shift!(fields)
         all(field->ismatch(Base.VERSION_REGEX, field), fields) ||
-            error("invalid requires entry for $package: $content")
-        versions = [ convert(VersionNumber, field) for field in fields ]
-        issorted(versions) || error("invalid requires entry for $package: $content")
+            throw(PkgError("invalid requires entry for $package: $content"))
+        versions = VersionNumber[fields...]
+        issorted(versions) || throw(PkgError("invalid requires entry for $package: $content"))
         new(content, package, VersionSet(versions), system)
     end
-    function Requirement(package::String, versions::VersionSet, system::Vector{String}=String[])
+    function Requirement(package::AbstractString, versions::VersionSet, system::Vector{AbstractString}=AbstractString[])
         content = ""
         for os in system
             content *= "@$os "
@@ -45,12 +49,21 @@ immutable Requirement <: Line
     end
 end
 
-# TODO: shouldn't be neccessary #4648
 ==(a::Line, b::Line) = a.content == b.content
+hash(s::Line, h::UInt) = hash(s.content, h + (0x3f5a631add21cb1a % UInt))
 
 # general machinery for parsing REQUIRE files
 
-function read(readable::Union(IO,Base.AbstractCmd))
+function read{T<:AbstractString}(readable::Vector{T})
+    lines = Line[]
+    for line in readable
+        line = chomp(line)
+        push!(lines, ismatch(r"^\s*(?:#|$)", line) ? Comment(line) : Requirement(line))
+    end
+    return lines
+end
+
+function read(readable::Union{IO,Base.AbstractCmd})
     lines = Line[]
     for line in eachline(readable)
         line = chomp(line)
@@ -58,7 +71,7 @@ function read(readable::Union(IO,Base.AbstractCmd))
     end
     return lines
 end
-read(file::String) = isfile(file) ? open(read,file) : Line[]
+read(file::AbstractString) = isfile(file) ? open(read,file) : Line[]
 
 function write(io::IO, lines::Vector{Line})
     for line in lines
@@ -66,11 +79,11 @@ function write(io::IO, lines::Vector{Line})
     end
 end
 function write(io::IO, reqs::Requires)
-    for pkg in sort!([keys(reqs)...], by=lowercase)
+    for pkg in sort!(collect(keys(reqs)), by=lowercase)
         println(io, Requirement(pkg, reqs[pkg]).content)
     end
 end
-write(file::String, r::Union(Vector{Line},Requires)) = open(io->write(io,r), file, "w")
+write(file::AbstractString, r::Union{Vector{Line},Requires}) = open(io->write(io,r), file, "w")
 
 function parse(lines::Vector{Line})
     reqs = Requires()
@@ -96,9 +109,21 @@ function parse(lines::Vector{Line})
 end
 parse(x) = parse(read(x))
 
-# add & rm – edit the content a requires file
+function dependents(packagename::AbstractString)
+    pkgs = AbstractString[]
+    cd(Pkg.dir()) do
+        for (pkg,latest) in Pkg.Read.latest()
+            if haskey(latest.requires, packagename)
+                push!(pkgs, pkg)
+            end
+        end
+    end
+    pkgs
+end
 
-function add(lines::Vector{Line}, pkg::String, versions::VersionSet=VersionSet())
+# add & rm – edit the content a requires file
+
+function add(lines::Vector{Line}, pkg::AbstractString, versions::VersionSet=VersionSet())
     v = VersionSet[]
     filtered = filter(lines) do line
         if !isa(line,Comment) && line.package == pkg && isempty(line.system)
@@ -112,7 +137,7 @@ function add(lines::Vector{Line}, pkg::String, versions::VersionSet=VersionSet()
     push!(filtered, Requirement(pkg, versions))
 end
 
-rm(lines::Vector{Line}, pkg::String) = filter(lines) do line
+rm(lines::Vector{Line}, pkg::AbstractString) = filter(lines) do line
     isa(line,Comment) || line.package != pkg
 end
 

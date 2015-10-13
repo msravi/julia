@@ -1,9 +1,14 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 module LinAlg
 
 importall Base
-import Base: USE_BLAS64, size, copy, copy_transpose!, power_by_squaring, print_matrix, transpose!
+importall ..Base.Operators
+import Base: USE_BLAS64, size, copy, copy_transpose!, power_by_squaring,
+             print_matrix, transpose!, unsafe_getindex, unsafe_setindex!,
+             isapprox
 
-export 
+export
 # Modules
     LAPACK,
     BLAS,
@@ -12,7 +17,6 @@ export
     SymTridiagonal,
     Tridiagonal,
     Bidiagonal,
-    Woodbury,
     Factorization,
     BunchKaufman,
     Cholesky,
@@ -23,7 +27,6 @@ export
     GeneralizedSchur,
     Hessenberg,
     LU,
-    LUTridiagonal,
     LDLt,
     QR,
     QRPivoted,
@@ -31,7 +34,8 @@ export
     SVD,
     Hermitian,
     Symmetric,
-    Triangular,
+    LowerTriangular,
+    UpperTriangular,
     Diagonal,
     UniformScaling,
 
@@ -42,8 +46,6 @@ export
     chol,
     cholfact,
     cholfact!,
-    cholpfact,
-    cholpfact!,
     cond,
     condskeel,
     copy!,
@@ -62,15 +64,16 @@ export
     eigmin,
     eigs,
     eigvals,
+    eigvals!,
     eigvecs,
     expm,
-    sqrtm,
     eye,
     factorize,
     givens,
     gradient,
     hessfact,
     hessfact!,
+    isdiag,
     ishermitian,
     isposdef,
     isposdef!,
@@ -81,32 +84,33 @@ export
     ldltfact!,
     ldltfact,
     linreg,
+    logabsdet,
     logdet,
+    logm,
     lu,
     lufact,
     lufact!,
     lyap,
     norm,
-    null,
+    nullspace,
+    ordschur!,
+    ordschur,
     peakflops,
     pinv,
     qr,
     qrfact!,
     qrfact,
-    qrp,
-    qrpfact!,
-    qrpfact,
     rank,
-    rref,
     scale,
     scale!,
     schur,
     schurfact!,
     schurfact,
-    solve,
+    sqrtm,
     svd,
     svdfact!,
     svdfact,
+    svds,
     svdvals!,
     svdvals,
     sylvester,
@@ -116,6 +120,7 @@ export
     triu,
     tril!,
     triu!,
+    vecdot,
     vecnorm,
 
 # Operators
@@ -124,7 +129,6 @@ export
     A_ldiv_B!,
     A_ldiv_Bc,
     A_ldiv_Bt,
-    A_mul_B,
     A_mul_B!,
     A_mul_Bc,
     A_mul_Bc!,
@@ -134,7 +138,6 @@ export
     A_rdiv_Bt,
     Ac_ldiv_B,
     Ac_ldiv_Bc,
-    Ac_mul_b_RFP,
     Ac_mul_B,
     Ac_mul_B!,
     Ac_mul_Bc,
@@ -153,48 +156,52 @@ export
 # Constants
     I
 
-typealias BlasFloat Union(Float64,Float32,Complex128,Complex64)
-typealias BlasReal Union(Float64,Float32)
-typealias BlasComplex Union(Complex128,Complex64)
-typealias BlasChar Char
+typealias BlasFloat Union{Float64,Float32,Complex128,Complex64}
+typealias BlasReal Union{Float64,Float32}
+typealias BlasComplex Union{Complex128,Complex64}
 
 if USE_BLAS64
     typealias BlasInt Int64
-    blas_int(x) = int64(x)
 else
     typealias BlasInt Int32
-    blas_int(x) = int32(x)
 end
 
-#Check that stride of matrix/vector is 1
-function chkstride1(A::StridedVecOrMat...)
-    for a in A 
-        stride(a,1)== 1 || error("Matrix does not have contiguous columns")
-    end  
+# Check that stride of matrix/vector is 1
+function chkstride1(A...)
+    for a in A
+        stride(a,1)== 1 || error("matrix does not have contiguous columns")
+    end
 end
 
-#Check that matrix is square
-function chksquare(A::AbstractMatrix)
+# Check that matrix is square
+function chksquare(A)
     m,n = size(A)
-    m == n || throw(DimensionMismatch("Matrix is not square"))
+    m == n || throw(DimensionMismatch("matrix is not square"))
     m
 end
 
 function chksquare(A...)
-    sizes=Int[]
-    for a in A 
-        size(a,1)==size(a,2) || throw(DimensionMismatch("Matrix is not square: dimensions are $(size(a))"))
+    sizes = Int[]
+    for a in A
+        size(a,1)==size(a,2) || throw(DimensionMismatch("matrix is not square: dimensions are $(size(a))"))
         push!(sizes, size(a,1))
     end
-    length(A)==1 ? sizes[1] : sizes
+    return sizes
 end
 
-#Check that upper/lower (for special matrices) is correctly specified
+# Check that upper/lower (for special matrices) is correctly specified
 macro chkuplo()
    :((uplo=='U' || uplo=='L') || throw(ArgumentError("""invalid uplo = $uplo
-            
+
 Valid choices are 'U' (upper) or 'L' (lower).""")))
 end
+
+const CHARU = 'U'
+const CHARL = 'L'
+char_uplo(uplo::Symbol) = uplo == :U ? CHARU : (uplo == :L ? CHARL : throw(ArgumentError("uplo argument must be either :U or :L")))
+
+copy_oftype{T,N}(A::AbstractArray{T,N}, ::Type{T}) = copy(A)
+copy_oftype{T,N,S}(A::AbstractArray{T,N}, ::Type{S}) = convert(AbstractArray{S,N}, A)
 
 include("linalg/exceptions.jl")
 include("linalg/generic.jl")
@@ -205,33 +212,38 @@ include("linalg/lapack.jl")
 
 include("linalg/dense.jl")
 include("linalg/tridiag.jl")
+include("linalg/triangular.jl")
+
 include("linalg/factorization.jl")
+include("linalg/qr.jl")
+include("linalg/eigen.jl")
+include("linalg/svd.jl")
+include("linalg/schur.jl")
+include("linalg/cholesky.jl")
 include("linalg/lu.jl")
 
 include("linalg/bunchkaufman.jl")
-include("linalg/triangular.jl")
 include("linalg/symmetric.jl")
-include("linalg/woodbury.jl")
 include("linalg/diagonal.jl")
 include("linalg/bidiag.jl")
 include("linalg/uniformscaling.jl")
-include("linalg/rectfullpacked.jl")
 include("linalg/givens.jl")
 include("linalg/special.jl")
 include("linalg/bitarray.jl")
 include("linalg/ldlt.jl")
 
-include("linalg/sparse.jl")
-include("linalg/umfpack.jl")
-include("linalg/cholmod.jl")
-
 include("linalg/arpack.jl")
 include("linalg/arnoldi.jl")
 
 function __init__()
-    Base.check_blas()
-    if Base.blas_vendor() == :mkl
-        ccall((:MKL_Set_Interface_Layer, Base.libblas_name), Void, (Cint,), USE_BLAS64 ? 1 : 0)
+    try
+        Base.check_blas()
+        if Base.blas_vendor() == :mkl
+            ccall((:MKL_Set_Interface_Layer, Base.libblas_name), Void, (Cint,), USE_BLAS64 ? 1 : 0)
+        end
+    catch ex
+        Base.showerror_nostdio(ex,
+            "WARNING: Error during initialization of module LinAlg")
     end
 end
 

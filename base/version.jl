@@ -1,42 +1,54 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 ## semantic version numbers (http://semver.org)
 
 immutable VersionNumber
     major::Int
     minor::Int
     patch::Int
-    prerelease::(Union(Int,ASCIIString)...)
-    build::(Union(Int,ASCIIString)...)
+    prerelease::Tuple{Vararg{Union{Int,ASCIIString}}}
+    build::Tuple{Vararg{Union{Int,ASCIIString}}}
 
-    function VersionNumber(major::Integer, minor::Integer, patch::Integer, pre::(Union(Int,ASCIIString)...), bld::(Union(Int,ASCIIString)...))
-        major >= 0 || error("invalid negative major version: $major")
-        minor >= 0 || error("invalid negative minor version: $minor")
-        patch >= 0 || error("invalid negative patch version: $patch")
+    function VersionNumber(
+        major::Int, minor::Int, patch::Int,
+        pre::Tuple{Vararg{Union{Int,ASCIIString}}},
+        bld::Tuple{Vararg{Union{Int,ASCIIString}}}
+    )
+        major >= 0 || throw(ArgumentError("invalid negative major version: $major"))
+        minor >= 0 || throw(ArgumentError("invalid negative minor version: $minor"))
+        patch >= 0 || throw(ArgumentError("invalid negative patch version: $patch"))
         for ident in pre
             if isa(ident,Int)
-                ident >= 0 || error("invalid negative pre-release identifier: $ident")
+                ident >= 0 || throw(ArgumentError("invalid negative pre-release identifier: $ident"))
             else
                 if !ismatch(r"^(?:|[0-9a-z-]*[a-z-][0-9a-z-]*)$"i, ident) ||
                     isempty(ident) && !(length(pre)==1 && isempty(bld))
-                    error("invalid pre-release identifier: ", repr(ident))
+                    throw(ArgumentError("invalid pre-release identifier: $(repr(ident))"))
                 end
             end
         end
         for ident in bld
             if isa(ident,Int)
-                ident >= 0 || error("invalid negative build identifier: $ident")
+                ident >= 0 || throw(ArgumentError("invalid negative build identifier: $ident"))
             else
                 if !ismatch(r"^(?:|[0-9a-z-]*[a-z-][0-9a-z-]*)$"i, ident) ||
                     isempty(ident) && length(bld)!=1
-                    error("invalid build identifier: ", repr(ident))
+                    throw(ArgumentError("invalid build identifier: $(repr(ident))"))
                 end
             end
         end
         new(major, minor, patch, pre, bld)
     end
 end
-VersionNumber(x::Integer, y::Integer, z::Integer) = VersionNumber(x, y, z, (), ())
-VersionNumber(x::Integer, y::Integer)             = VersionNumber(x, y, 0, (), ())
-VersionNumber(x::Integer)                         = VersionNumber(x, 0, 0, (), ())
+VersionNumber(
+    major::Integer, minor::Integer = 0, patch::Integer = 0,
+    pre::Tuple{Vararg{Union{Integer,AbstractString}}} = (),
+    bld::Tuple{Vararg{Union{Integer,AbstractString}}} = (),
+) = VersionNumber(
+    Int(major), Int(minor), Int(patch),
+    map(x->isa(x,Integer) ? Int(x) : ASCIIString(x), pre),
+    map(x->isa(x,Integer) ? Int(x) : ASCIIString(x), bld),
+)
 
 function print(io::IO, v::VersionNumber)
     v == typemax(VersionNumber) && return print(io, "∞")
@@ -71,30 +83,32 @@ const VERSION_REGEX = r"^
     ))
 $"ix
 
-function split_idents(s::String)
+function split_idents(s::AbstractString)
     idents = split(s, '.')
     ntuple(length(idents)) do i
         ident = idents[i]
-        ismatch(r"^\d+$", ident) ? parseint(ident) : bytestring(ident)
+        ismatch(r"^\d+$", ident) ? parse(Int, ident) : bytestring(ident)
     end
 end
 
-function convert(::Type{VersionNumber}, v::String)
+VersionNumber(v::AbstractString) = begin
     m = match(VERSION_REGEX, v)
-    if m == nothing error("invalid version string: $v") end
+    m === nothing && throw(ArgumentError("invalid version string: $v"))
     major, minor, patch, minus, prerl, plus, build = m.captures
-    major = int(major)
-    minor = minor != nothing ? int(minor) : 0
-    patch = patch != nothing ? int(patch) : 0
-    if prerl != nothing && !isempty(prerl) && prerl[1] == '-'
+    major = parse(Int, major)
+    minor = minor !== nothing ? parse(Int, minor) : 0
+    patch = patch !== nothing ? parse(Int, patch) : 0
+    if prerl !== nothing && !isempty(prerl) && prerl[1] == '-'
         prerl = prerl[2:end] # strip leading '-'
     end
-    prerl = prerl != nothing ? split_idents(prerl) : minus == "-" ? ("",) : ()
-    build = build != nothing ? split_idents(build) : plus  == "+" ? ("",) : ()
+    prerl = prerl !== nothing ? split_idents(prerl) : minus == "-" ? ("",) : ()
+    build = build !== nothing ? split_idents(build) : plus  == "+" ? ("",) : ()
     VersionNumber(major, minor, patch, prerl, build)
 end
 
-macro v_str(v); convert(VersionNumber, v); end
+convert(::Type{VersionNumber}, v::AbstractString) = VersionNumber(v)
+
+macro v_str(v); VersionNumber(v); end
 
 typemin(::Type{VersionNumber}) = v"0-"
 typemax(::Type{VersionNumber}) = VersionNumber(typemax(Int),typemax(Int),typemax(Int),(),("",))
@@ -104,8 +118,8 @@ ident_cmp(a::Int, b::ASCIIString) = isempty(b) ? +1 : -1
 ident_cmp(a::ASCIIString, b::Int) = isempty(a) ? -1 : +1
 ident_cmp(a::ASCIIString, b::ASCIIString) = cmp(a,b)
 
-function ident_cmp(A::(Union(Int,ASCIIString)...),
-                   B::(Union(Int,ASCIIString)...))
+function ident_cmp(A::Tuple{Vararg{Union{Int,ASCIIString}}},
+                   B::Tuple{Vararg{Union{Int,ASCIIString}}})
     i = start(A)
     j = start(B)
     while !done(A,i) && !done(B,i)
@@ -148,8 +162,8 @@ function isless(a::VersionNumber, b::VersionNumber)
     return false
 end
 
-function hash(v::VersionNumber, h::Uint)
-    h += uint(0x8ff4ffdb75f9fede)
+function hash(v::VersionNumber, h::UInt)
+    h += 0x8ff4ffdb75f9fede % UInt
     h = hash(v.major, h)
     h = hash(v.minor, h)
     h = hash(v.patch, h)
@@ -205,7 +219,8 @@ function banner(io::IO = STDOUT)
     elseif GIT_VERSION_INFO.commit == ""
         commit_string = ""
     else
-        days = int(floor((ccall(:clock_now, Float64, ()) - GIT_VERSION_INFO.fork_master_timestamp) / (60 * 60 * 24)))
+        days = Int(floor((ccall(:clock_now, Float64, ()) - GIT_VERSION_INFO.fork_master_timestamp) / (60 * 60 * 24)))
+        days = max(0, days)
         unit = days == 1 ? "day" : "days"
         distance = GIT_VERSION_INFO.fork_master_distance
         commit = GIT_VERSION_INFO.commit_short
@@ -227,10 +242,10 @@ function banner(io::IO = STDOUT)
         d3 = "\033[32m" # third dot
         d4 = "\033[35m" # fourth dot
 
-        print(io,"""\033[1m               $(d3)_
-           $(d1)_       $(jl)_$(tx) $(d2)_$(d3)(_)$(d4)_$(tx)     |  A fresh approach to technical computing
+        print(io,"""\033[1m               $(d3)_$(tx)
+           $(d1)_$(tx)       $(jl)_$(tx) $(d2)_$(d3)(_)$(d4)_$(tx)     |  A fresh approach to technical computing
           $(d1)(_)$(jl)     | $(d2)(_)$(tx) $(d4)(_)$(tx)    |  Documentation: http://docs.julialang.org
-           $(jl)_ _   _| |_  __ _$(tx)   |  Type \"help()\" to list help topics
+           $(jl)_ _   _| |_  __ _$(tx)   |  Type \"?help\" for help.
           $(jl)| | | | | | |/ _` |$(tx)  |
           $(jl)| | |_| | | | (_| |$(tx)  |  Version $(VERSION)$(commit_date)
          $(jl)_/ |\\__'_|_|_|\\__'_|$(tx)  |  $(commit_string)
@@ -242,7 +257,7 @@ function banner(io::IO = STDOUT)
                        _
            _       _ _(_)_     |  A fresh approach to technical computing
           (_)     | (_) (_)    |  Documentation: http://docs.julialang.org
-           _ _   _| |_  __ _   |  Type \"help()\" to list help topics
+           _ _   _| |_  __ _   |  Type \"?help\" for help.
           | | | | | | |/ _` |  |
           | | |_| | | | (_| |  |  Version $(VERSION)$(commit_date)
          _/ |\\__'_|_|_|\\__'_|  |  $(commit_string)

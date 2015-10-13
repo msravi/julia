@@ -1,9 +1,11 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 module Cache
 
-import ..Git, ..Dir
+import ...LibGit2, ..Dir, ...Pkg.PkgError
 using ..Types
 
-path(pkg::String) = abspath(".cache", pkg)
+path(pkg::AbstractString) = abspath(".cache", pkg)
 
 function mkcachedir()
     cache = joinpath(realpath("."), ".cache")
@@ -11,40 +13,51 @@ function mkcachedir()
         return
     end
 
-    @windows_only mkdir(cache)
-    @unix_only begin
-        if Dir.isversioned(pwd())
-            rootcache = joinpath(realpath(".."), ".cache")
-            if !isdir(rootcache)
-                mkdir(rootcache)
-            end
-            symlink(rootcache, cache)
-            return
-        end
+    @windows_only if Base.windows_version() < Base.WINDOWS_VISTA_VER
         mkdir(cache)
+        return
     end
+    if Dir.isversioned(pwd())
+        rootcache = joinpath(realpath(".."), ".cache")
+        if !isdir(rootcache)
+            mkdir(rootcache)
+        end
+        symlink(rootcache, cache)
+        return
+    end
+    mkdir(cache)
 end
 
-
-function prefetch{S<:String}(pkg::String, url::String, sha1s::Vector{S})
+function prefetch(pkg::AbstractString, url::AbstractString, sha1s::Vector)
     isdir(".cache") || mkcachedir()
+    #TODO: force switch to https
+    #url = LibGit2.normalize_url(url)
     cache = path(pkg)
-    if !isdir(cache)
+    repo = if isdir(cache)
+        LibGit2.GitRepo(cache) # open repo, free it at the end
+    else
         info("Cloning cache of $pkg from $url")
-        try Git.run(`clone -q --mirror $url $cache`)
-        catch
-            rm(cache, recursive=true)
-            rethrow()
+        try
+            # clone repo, free it at the end
+            LibGit2.clone(url, cache, isbare = true, remote_cb = LibGit2.mirror_cb())
+        catch err
+            isdir(cache) && rm(cache, recursive=true)
+            throw(PkgError("Cannot clone $pkg from $url. $(err.msg)"))
         end
     end
-    Git.set_remote_url(url, dir=cache)
-    if !all(sha1->Git.iscommit(sha1, dir=cache), sha1s)
-        info("Updating cache of $pkg...")
-	    Git.success(`remote update`, dir=cache) ||
-            error("couldn't update $cache using `git remote update`")
-	end
-    filter(sha1->!Git.iscommit(sha1, dir=cache), sha1s)
+    try
+        LibGit2.set_remote_url(repo, url)
+        in_cache = BitArray(map(sha1->LibGit2.iscommit(sha1, repo), sha1s))
+        if !all(in_cache)
+            info("Updating cache of $pkg...")
+            LibGit2.fetch(repo)
+            in_cache = BitArray(map(sha1->LibGit2.iscommit(sha1, repo), sha1s))
+        end
+        sha1s[!in_cache]
+    finally
+        finalize(repo) # closing repo opened/created above
+    end
 end
-prefetch(pkg::String, url::String, sha1::String...) = prefetch(pkg, url, String[sha1...])
+prefetch(pkg::AbstractString, url::AbstractString, sha1::AbstractString...) = prefetch(pkg, url, AbstractString[sha1...])
 
 end # module

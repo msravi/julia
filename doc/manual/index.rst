@@ -28,12 +28,15 @@
    linear-algebra
    networking-and-streams
    parallel-computing
+   dates
    interacting-with-julia
    running-external-programs
    calling-c-and-fortran-code
    embedding
    packages
+   profile
    performance-tips
    style-guide
    faq
    noteworthy-differences
+   unicode-input

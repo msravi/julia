@@ -8,17 +8,17 @@ A variable, in Julia, is a name associated (or bound) to a value. It's useful wh
 .. doctest::
 
     # Assign the value 10 to the variable x
-    julia> x = 10 
+    julia> x = 10
     10
-    
+
     # Doing math with x's value
     julia> x + 1
     11
-    
+
     # Reassign x's value
-    julia> x = 1 + 1 
+    julia> x = 1 + 1
     2
-    
+
     # You can assign values of other types, like strings of text
     julia> x = "Hello World!"
     "Hello World!"
@@ -63,8 +63,14 @@ Unicode names (in UTF-8 encoding) are allowed:
     julia> δ = 0.00001
     1.0e-5
 
-    julia> 안녕하세요 = "Hello" 
+    julia> 안녕하세요 = "Hello"
     "Hello"
+
+In the Julia REPL and several other Julia editing environments, you
+can type many Unicode math symbols by typing the backslashed LaTeX symbol
+name followed by tab.  For example, the variable name ``δ`` can be
+entered by typing ``\delta``-*tab*, or even ``α̂₂`` by
+``\alpha``-*tab*-``\hat``-*tab*-``\_2``-*tab*.
 
 .. raw:: latex
 
@@ -76,32 +82,44 @@ Julia will even let you redefine built-in constants and functions if needed:
 
     julia> pi
     π = 3.1415926535897...
-    
+
     julia> pi = 3
-    Warning: imported binding for pi overwritten in module Main
+    WARNING: imported binding for pi overwritten in module Main
     3
-    
+
     julia> pi
     3
-    
+
     julia> sqrt(100)
     10.0
-    
+
     julia> sqrt = 4
+    WARNING: imported binding for sqrt overwritten in module Main
     4
-    
+
 However, this is obviously not recommended to avoid potential confusion.
 
 Allowed Variable Names
 ======================
 
-Variable names must begin with a letter (A-Z or a-z), underscore, or Unicode
-character with code point greater than 00A0. Subsequent characters may also include
-! and digits (0-9).
+Variable names must begin with a letter (A-Z or a-z), underscore, or a
+subset of Unicode code points greater than 00A0; in particular, `Unicode character categories`_ Lu/Ll/Lt/Lm/Lo/Nl (letters), Sc/So (currency and
+other symbols), and a few other letter-like characters (e.g. a subset
+of the Sm math symbols) are allowed. Subsequent characters may also
+include ! and digits (0-9 and other characters in categories Nd/No),
+as well as other Unicode code points: diacritics and other modifying
+marks (categories Mn/Mc/Me/Sk), some punctuation connectors (category
+Pc), primes, and a few other characters.
 
-All operators are also valid identifiers, but are parsed specially. In some
-contexts operators can be used just like variables; for example ``(+)`` refers
-to the addition function, and ``(+) = f`` will reassign it.
+.. _Unicode character categories: http://www.fileformat.info/info/unicode/category/index.htm
+
+Operators like ``+`` are also valid identifiers, but are parsed specially. In
+some contexts, operators can be used just like variables; for example
+``(+)`` refers to the addition function, and ``(+) = f`` will reassign
+it.  Most of the Unicode infix operators (in category Sm),
+such as ``⊕``, are parsed as infix operators and are available for
+user-defined methods (e.g. you can use ``const ⊗ = kron`` to define
+``⊗`` as an infix Kronecker product).
 
 The only explicitly disallowed names for variables are the names of built-in
 statements:
@@ -110,7 +128,7 @@ statements:
 
     julia> else = false
     ERROR: syntax: unexpected "else"
-    
+
     julia> try = "No"
     ERROR: syntax: unexpected "="
 
@@ -122,11 +140,13 @@ While Julia imposes few restrictions on valid names, it has become useful to
 adopt the following conventions:
 
 - Names of variables are in lower case.
-- Word separation can be indicated by underscores (``'\_'``), but use of
+- Word separation can be indicated by underscores (``'_'``), but use of
   underscores is discouraged unless the name would be hard to read otherwise.
-- Names of ``Type``\ s begin with a capital letter and word separation is
-  shown with CamelCase instead of underscores.
+- Names of ``Type``\ s and ``Module``\ s begin with a capital letter and word separation is
+  shown with upper camel case instead of underscores.
 - Names of ``function``\ s and ``macro``\s are in lower case, without
   underscores.
-- Functions that modify their inputs have names that end in ``!``. These
-  functions are sometimes called mutating functions or in-place functions.
+- Functions that write to their arguments have names that end in ``!``.
+  These are sometimes called "mutating" or "in-place" functions because
+  they are intended to produce changes in their arguments after the
+  function is called, not just return a value.

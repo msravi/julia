@@ -1,3 +1,4 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
 
 # Basic goto tests
 
@@ -87,4 +88,16 @@ end
 
 @test goto_test7(false) == nothing
 
+module GotoMacroTest
+    macro goto_test8_macro()
+        quote
+            function $(esc(:goto_test8))()
+                @label a
+                @goto a
+            end
+        end
+    end
+end
+
+GotoMacroTest.@goto_test8_macro
 
